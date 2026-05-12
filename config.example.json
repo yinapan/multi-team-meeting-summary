@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "org_name": "",
+  "important_people": [],
+  "llm": {
+    "command": "claude",
+    "args": ["-p"],
+    "model": null,
+    "timeout": 300000
+  },
+  "teams": [
+    {
+      "id": "team0",
+      "name": "示例团队",
+      "leader": "负责人姓名",
+      "sources": [
+        {
+          "drive_id": "YOUR_DRIVE_ID",
+          "root_folder_id": "YOUR_ROOT_FOLDER_ID",
+          "months": {
+            "3月": "FOLDER_ID_MARCH",
+            "4月": "FOLDER_ID_APRIL",
+            "5月": "FOLDER_ID_MAY"
+          }
+        }
+      ]
+    }
+  ]
+}
