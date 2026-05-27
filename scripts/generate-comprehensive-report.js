@@ -8,7 +8,7 @@ const {
   formatSourceRef, withSourceRef, normalizeMultiSourceBulletPrefixes,
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
   docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, writeOutputJson, normalizeDate, formatDateChinese, dateInRange,
-  readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, summarizePrimaryMeetingTypes,
+  extractMeetingDate, readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   printAiReviewWarning,
   isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
@@ -30,6 +30,45 @@ function isMultiSource(td, multiSourceSet) {
   if (!multiSourceSet.has(td.teamName)) return false;
   const labels = new Set(td.data.documents.map(d => d.sourceLabel).filter(Boolean));
   return labels.size > 1;
+}
+
+function teamDocCount(td) {
+  return ((td && td.data && td.data.documents) || []).length;
+}
+
+function sortTeamsByDocumentCount(teamDataList) {
+  return [...(teamDataList || [])].sort((a, b) =>
+    teamDocCount(b) - teamDocCount(a) || String(a.teamName || '').localeCompare(String(b.teamName || ''), 'zh-Hans-CN')
+  );
+}
+
+function stripDocExt(name) {
+  return String(name || '').replace(/\.(otl|docx?|pdf|xlsx?|pptx?)$/i, '');
+}
+
+function formatMeetingDate(doc) {
+  const d = extractMeetingDate(doc.name || doc.title || '', doc.rawContent || '');
+  return d ? `${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}` : '未识别';
+}
+
+function buildAppendixMeetingRows(teamDataList) {
+  const rows = [];
+  for (const td of sortTeamsByDocumentCount(teamDataList)) {
+    for (const doc of td.data.documents || []) {
+      const title = stripDocExt(doc.name || doc.title || '');
+      rows.push({
+        team: td.teamName,
+        date: formatMeetingDate(doc),
+        type: classifyMeetingType(title),
+        title
+      });
+    }
+  }
+  return rows.sort((a, b) =>
+    a.team.localeCompare(b.team, 'zh-Hans-CN') ||
+    a.date.localeCompare(b.date) ||
+    a.title.localeCompare(b.title, 'zh-Hans-CN')
+  );
 }
 
 // ========== 跨团队风险去重 ==========
@@ -399,6 +438,8 @@ async function main() {
   const excludedMeetings = (baseline && Array.isArray(baseline.excludedMeetings)) ? baseline.excludedMeetings : [];
 
   const teamCount = teamDataList.length;
+  const appendixTeamRows = sortTeamsByDocumentCount(teamDataList);
+  const appendixMeetingRows = buildAppendixMeetingRows(teamDataList);
   const inclusionRate = reportCounts.meetingListCount > 0 ? Math.round((reportCounts.analyzedDocumentCount / reportCounts.meetingListCount) * 100) : 100;
   const now = new Date();
   const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
@@ -528,12 +569,23 @@ async function main() {
           h2("团队汇总"),
           new Table({ columnWidths: [2200, 2400, 1200, 1200, 2026], rows: [
             new TableRow({ tableHeader: true, children: [hCell("团队", 2200), hCell("主要会议类型", 2400), hCell("文档数", 1200), hCell("结论数", 1200), hCell("待办数", 2026)] }),
-            ...teamDataList.map(td => new TableRow({ children: [
+            ...appendixTeamRows.map(td => new TableRow({ children: [
               cCell(td.teamName, 2200),
               cCell(summarizePrimaryMeetingTypes(td.data.documents, 5), 2400),
               cCell(`${td.data.documents.length}份`, 1200),
               cCell(`${td.analysis.totalConclusions}`, 1200),
               cCell(`${td.analysis.totalTodos}`, 2026)
+            ]}))
+          ]}),
+          new Paragraph({ spacing: { before: 300 }, children: [] }),
+          h2("会议清单明细"),
+          new Table({ columnWidths: [1700, 1100, 1700, 4526], rows: [
+            new TableRow({ tableHeader: true, children: [hCell("团队", 1700), hCell("日期", 1100), hCell("会议类型", 1700), hCell("会议标题", 4526)] }),
+            ...appendixMeetingRows.map(row => new TableRow({ children: [
+              cCell(row.team, 1700),
+              cCell(row.date, 1100),
+              cCell(row.type, 1700),
+              cCell(row.title.substring(0, 80), 4526)
             ]}))
           ]}),
           new Paragraph({ spacing: { before: 300 }, children: [] }),

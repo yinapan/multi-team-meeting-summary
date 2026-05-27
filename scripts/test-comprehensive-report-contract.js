@@ -20,6 +20,9 @@ assert(!riskPrompt.includes('| 来源会议 |'), 'risk matrix prompt should not 
 const source = fs.readFileSync(path.join(__dirname, 'generate-comprehensive-report.js'), 'utf-8');
 assert(source.includes('meeting-baseline'), 'comprehensive report should read/write a shared meeting baseline');
 assert(source.includes('summarizePrimaryMeetingTypes'), 'appendix should use shared meeting type summary');
+assert(source.includes('buildAppendixMeetingRows'), 'appendix should emit meeting list details from the shared analyzed data');
+assert(source.includes('sortTeamsByDocumentCount'), 'appendix team summary should be sorted by analyzed document count');
+assert(source.includes('classifyMeetingType'), 'appendix meeting details should use the shared meeting type classifier');
 const fallbackRiskSource = source.slice(source.indexOf('elements.push(h2("2.3'), source.indexOf('// 三、', source.indexOf('elements.push(h2("2.3')));
 assert(!fallbackRiskSource.includes('来源会议'), 'fallback risk matrix should not emit source meeting column');
 
