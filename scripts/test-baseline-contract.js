@@ -5,7 +5,8 @@ const {
   getBaselineFileName,
   getRiskImpactScope,
   classifyMeetingType,
-  summarizePrimaryMeetingTypes
+  summarizePrimaryMeetingTypes,
+  getKdocsCliArgs
 } = require('./shared');
 
 const teams = [
@@ -52,5 +53,10 @@ assert.strictEqual(summarizePrimaryMeetingTypes([
   { name: '0512-Alpha技术专项会' },
   { name: '0513-Alpha周会' }
 ]), '技术专项会(2)、项目周会(1)');
+
+const kdocsArgs = getKdocsCliArgs(['drive', 'list-files']);
+assert.strictEqual(kdocsArgs[0], '--token');
+assert.strictEqual(kdocsArgs[2], 'drive');
+assert.strictEqual(kdocsArgs[3], 'list-files');
 
 console.log('baseline contract tests passed');

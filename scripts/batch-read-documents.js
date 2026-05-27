@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamSources, selectMonthEntriesForRange, scanFilesByMode, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamSources, selectMonthEntriesForRange, scanFilesByMode, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
@@ -22,7 +22,7 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
     };
     const inputJson = JSON.stringify({ drive_id: driveId, file_id: fileId, format: "markdown", include_elements: "para" });
     if (pacer && typeof pacer.noteRequest === 'function') pacer.noteRequest('read');
-    const child = require('child_process').spawn(getKdocsCliPath(), ['drive', 'read-file-content', '--output', 'json'], {
+    const child = require('child_process').spawn(getKdocsCliPath(), getKdocsCliArgs(['drive', 'read-file-content', '--output', 'json']), {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
     });
     let stdout = '';

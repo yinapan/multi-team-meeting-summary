@@ -33,6 +33,11 @@ function getKdocsCliEnv() {
   return env;
 }
 
+function getKdocsCliArgs(args = []) {
+  const cfg = getKdocsConfig();
+  return cfg.token ? ['--token', cfg.token, ...args] : args;
+}
+
 try {
   require.resolve('docx');
 } catch (_) {
@@ -566,7 +571,7 @@ function listFolder(driveId, parentId, teamName) {
   const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const raw = execFileSync(getKdocsCliPath(), ['drive', 'list-files', '--output', 'json'], {
+      const raw = execFileSync(getKdocsCliPath(), getKdocsCliArgs(['drive', 'list-files', '--output', 'json']), {
         input: inputJson, encoding: 'utf-8', timeout: 15000, windowsHide: true, env: getKdocsCliEnv()
       });
       const parsed = JSON.parse(raw);
@@ -811,7 +816,7 @@ function scanFolderAll(driveId, folderId, teamName) {
 // ========== 异步版本 KDocs 扫描 ==========
 function spawnKdocsCli(args, inputJson, timeout) {
   return new Promise((resolve) => {
-    const child = require('child_process').spawn(getKdocsCliPath(), args, {
+    const child = require('child_process').spawn(getKdocsCliPath(), getKdocsCliArgs(args), {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
     });
     let stdout = '';
@@ -2917,7 +2922,7 @@ module.exports = {
   listFolderAsync, searchFilesAsync: searchFilesAsyncRateLimited, dateToUnixSeconds,
   scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, dedupeKdocsFiles,
-  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv,
+  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs,
   getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   normalizeTitle, normalizeForMatch, charSimilarity,
   sleepSync,
