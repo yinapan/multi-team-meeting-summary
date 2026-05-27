@@ -1,13 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  resolveWorkspaceDir, scanFolderAllAsync, normalizeForMatch, normalizeTitle, charSimilarity, getTeamSources, RequestPacer
+  scanFolderAllAsync, normalizeForMatch, normalizeTitle, charSimilarity, getTeamSources, RequestPacer,
+  findInputFile, writeOutputJson
 } = require('./shared');
 
 async function main() {
-  const workspaceDir = resolveWorkspaceDir();
   const configFile = path.join(__dirname, '..', 'config.json');
-  const dataFile = path.join(workspaceDir, 'all-team-summaries.json');
+  const dataFile = findInputFile('all-team-summaries.json');
 
   if (!fs.existsSync(dataFile)) {
     console.error(`数据文件不存在: ${dataFile}`);
@@ -84,8 +84,8 @@ async function main() {
 
   console.log(`匹配结果: ${matched}/${total} 条会议记录已添加链接`);
 
-  fs.writeFileSync(dataFile, JSON.stringify(teams, null, 2), 'utf-8');
-  console.log(`已更新: ${dataFile}`);
+  const outFile = writeOutputJson('all-team-summaries.json', teams);
+  console.log(`已更新: ${outFile}`);
 }
 
 main().catch(console.error);

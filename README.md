@@ -6,7 +6,7 @@
 
 - **Node.js** 18+
 - **kdocs-cli** — KDocs MCP CLI 工具（用于读取云文档）
-- **npm 依赖** — 首次运行时自动安装，无需手动执行 `npm install`
+- **npm 依赖** — 运行 `node scripts/setup.js` 时会自动检查并安装；也可手动执行 `npm install`
 
 ## 快速开始
 
@@ -52,9 +52,13 @@ node scripts/generate-kanban.js
 
 生成可交互的 HTML 会议看板（团队 × 周次矩阵视图）。
 
+## 输出目录
+
+脚本生成的 JSON、Markdown、Word 报告和 HTML 看板统一写入 `outputs/` 目录。为兼容旧数据，读取输入数据时会优先查找 `outputs/`，找不到时再回退到项目根目录的历史文件。
+
 ## LLM 分析
 
-报告生成支持 LLM 深度分析。OpenClaw 用户和 Claude CLI 用户均无需额外配置，自动检测环境调用 LLM。全部不可用时自动回退到规则分析。
+报告生成支持 LLM 深度分析。OpenClaw 用户无需额外配置，自动检测环境调用 LLM。全部不可用时自动回退到规则分析。
 
 如需手动配置 API，在 `config.json` 中添加：
 
@@ -77,11 +81,14 @@ node scripts/generate-kanban.js
 ├── config.json            # 用户配置（.gitignore 排除）
 ├── package.json           # 依赖声明
 ├── SKILL.md               # 完整文档
+├── outputs/               # 生成物目录（JSON / Markdown / DOCX / HTML）
 └── scripts/
     ├── setup.js                        # 引导式配置
+    ├── resolve-drive-ids-v2.js         # 解析 link_id → drive_id
     ├── shared.js                       # 共享模块
     ├── batch-read-documents.js         # 批量读取文档
-    ├── generate-team-report.js         # 单团队报告
+    ├── reconstruct-from-cache.js       # 离线从缓存重建数据
+    ├── generate-team-report.js         # 单团队报告（完成后自动生成看板）
     ├── generate-comprehensive-report.js # 综合报告
     ├── generate-kanban.js              # 会议看板
     └── enrich-meeting-data.js          # URL 补充

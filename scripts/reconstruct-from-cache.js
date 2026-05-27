@@ -5,13 +5,14 @@
 const fs = require('fs');
 const path = require('path');
 
-const cacheDir = path.join(__dirname, '..', 'cache');
-const workspaceDir = resolveWorkspaceDir();
-
 const {
   extractDateFromFileName, dateInRange, normalizeDate,
-  getWeekKey, readCache, getTeamSources, extractInfo, resolveWorkspaceDir
+  getWeekKey, readCache, getTeamSources, extractInfo, resolveWorkspaceDir,
+  findInputFile, writeOutputJson
 } = require('./shared');
+
+const cacheDir = path.join(__dirname, '..', 'cache');
+const workspaceDir = resolveWorkspaceDir();
 
 function main() {
   const args = process.argv.slice(2);
@@ -80,7 +81,7 @@ function main() {
       // 尝试从现有 per-label team-summary 文件中推断 folder_id → label 映射
       for (const src of teamCfg.sources) {
         if (!src.label) continue;
-        const labelFile = path.join(workspaceDir, `team-summary-${teamName}-${src.label}.json`);
+        const labelFile = findInputFile(`team-summary-${teamName}-${src.label}.json`);
         const labelData = readCache(labelFile);
         if (!labelData || !labelData.documents) continue;
         // 收集该 label 下所有文档的 URL
@@ -149,14 +150,12 @@ function main() {
     return { team: td.team, weeks };
   });
 
-  const outFile = path.join(workspaceDir, 'all-team-summaries.json');
-  fs.writeFileSync(outFile, JSON.stringify(teamSummaries, null, 2), 'utf-8');
+  const outFile = writeOutputJson('all-team-summaries.json', teamSummaries);
   console.log(`\n已保存: ${outFile}`);
 
   // 保存每个团队的独立数据文件
   for (const td of allTeamsData) {
-    const teamFile = path.join(workspaceDir, `team-summary-${td.team}.json`);
-    fs.writeFileSync(teamFile, JSON.stringify(td, null, 2), 'utf-8');
+    const teamFile = writeOutputJson(`team-summary-${td.team}.json`, td);
     console.log(`  → ${teamFile} (${td.documents.length} 篇)`);
 
     // 多 source 团队：按 label 分组保存
@@ -170,8 +169,7 @@ function main() {
     if (docLabels.size > 1) {
       for (const [label, labelDocs] of docLabels) {
         const labelData = { team: td.team, label, documents: labelDocs, totalScanned: labelDocs.length };
-        const labelFile = path.join(workspaceDir, `team-summary-${td.team}-${label}.json`);
-        fs.writeFileSync(labelFile, JSON.stringify(labelData, null, 2), 'utf-8');
+        const labelFile = writeOutputJson(`team-summary-${td.team}-${label}.json`, labelData);
         console.log(`  → ${labelFile} (${labelDocs.length} 篇)`);
       }
     }

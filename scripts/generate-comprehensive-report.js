@@ -5,11 +5,25 @@ const {
   makeHeader, makeFooter, makeCoverPage,
   cleanText, isValidConclusion, makeSuggestion, textSimilar, dedupTexts, analyzeDocs,
   generateStrategicAnalysis, callLLM, buildComprehensiveReportPrompt, parseReportMarkdown,
-  docStyles, docNumbering, resolveWorkspaceDir, normalizeDate, formatDateChinese, dateInRange,
+  formatSourceRef, withSourceRef, normalizeMultiSourceBulletPrefixes,
+  compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
+  docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, writeOutputJson, normalizeDate, formatDateChinese, dateInRange,
+  readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, summarizePrimaryMeetingTypes,
   isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, PageNumber
 } = require('./shared');
+
+function getReportLimits(config = {}) {
+  const report = config.report || {};
+  return {
+    perDocumentItemLimit: Number(report.perDocumentItemLimit) || 5,
+    sectionItemLimit: Number(report.sectionItemLimit) || 12,
+    multiSourceSectionItemLimit: Number(report.multiSourceSectionItemLimit) || 10,
+    promptMinItems: Number(report.promptMinItems) || 5,
+    promptMaxItems: Number(report.promptMaxItems) || 12
+  };
+}
 
 function isMultiSource(td, multiSourceSet) {
   if (!multiSourceSet.has(td.teamName)) return false;
@@ -31,9 +45,47 @@ function dedupRisks(risks) {
   return result;
 }
 
+function firstAnalysisSource(analysis) {
+  const item = (analysis.allConclusionItems || [])[0] || (analysis.allTodoItems || [])[0] || {};
+  return item.source || '';
+}
+
+function sourcedItemText(item) {
+  if (typeof item === 'string') return item;
+  return withSourceRef(item.text, item.source);
+}
+
+function plainItemText(item) {
+  return typeof item === 'string' ? item : (item && item.text) || '';
+}
+
+function makeRiskMatrixRows(highRisks, midRisks, highLimit = 8, midLimit = 5) {
+  return [
+    ...(highRisks || []).slice(0, highLimit).map(r => ({
+      text: String(r.text || '').substring(0, 60),
+      level: '高',
+      scope: getRiskImpactScope(r)
+    })),
+    ...(midRisks || []).slice(0, midLimit).map(r => ({
+      text: String(r.text || '').substring(0, 60),
+      level: '中',
+      scope: getRiskImpactScope(r)
+    }))
+  ];
+}
+
+function baselineCountsForReport(baseline, fallback) {
+  const counts = (baseline && baseline.counts) || {};
+  return {
+    meetingListCount: Number(counts.meetingListCount) || fallback.meetingListCount || fallback.analyzedDocumentCount || 0,
+    successfulReadCount: Number(counts.successfulReadCount) || fallback.successfulReadCount || fallback.analyzedDocumentCount || 0,
+    analyzedDocumentCount: Number(counts.analyzedDocumentCount) || fallback.analyzedDocumentCount || 0
+  };
+}
+
 // ========== 规则回退：生成 1.2-5 章节 ==========
 function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
-  const { grandTotalDocs, multiSourceSet } = opts;
+  const { grandTotalDocs, multiSourceSet, reportLimits = getReportLimits() } = opts;
   const elements = [];
 
   // 1.2 主要趋势
@@ -43,14 +95,14 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
     if (isMultiSource(td, multiSourceSet)) {
       const groups = groupByLabel(td.data.documents, td.teamName);
       for (const [label, docs] of groups) {
-        const labelAnalysis = analyzeDocs(docs, `${td.teamName}-${label}`, opts);
+        const labelAnalysis = analyzeDocs(docs, td.teamName, { ...opts, label });
         for (const t of (labelAnalysis.trends || []).slice(0, 2)) {
-          trendItems.push({ team: `${td.teamName}·${label}`, text: t });
+          trendItems.push({ team: `${td.teamName}-${label}`, text: withSourceRef(t, firstAnalysisSource(labelAnalysis)) });
         }
       }
     } else {
       for (const t of (td.analysis.trends || []).slice(0, 3)) {
-        trendItems.push({ team: td.teamName, text: t });
+        trendItems.push({ team: td.teamName, text: withSourceRef(t, firstAnalysisSource(td.analysis)) });
       }
     }
   });
@@ -64,7 +116,7 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   if (dedupedTrends.length > 0) {
     dedupedTrends.slice(0, 8).forEach(it => elements.push(bullet(it.text, { bold: `【${it.team}】` })));
   } else {
-    dedupTexts(teamDataList.flatMap(td => td.analysis.allConclusions.slice(0, 3))).slice(0, 5).forEach(c => elements.push(bullet(c.substring(0, 150))));
+    teamDataList.flatMap(td => (td.analysis.allConclusionItems || []).slice(0, 3)).slice(0, 5).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
   }
 
   // 二、风险点分析
@@ -73,8 +125,8 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   elements.push(h2("2.1 高风险事项"));
   if (allHighRisks.length > 0) {
     allHighRisks.slice(0, 10).forEach(r => {
-      const prefix = r.label ? `${r.team}·${r.label}` : r.team;
-      elements.push(bullet(`${prefix}${r.text}`, { bold: '【高】' }));
+      const prefix = r.label ? `${r.team}-${r.label}` : r.team;
+      elements.push(bullet(`${prefix}${withSourceRef(r.text, r.source)}`, { bold: '【高】' }));
     });
   } else {
     elements.push(p("本期会议记录中未发现高风险事项。", { color: C.gray }));
@@ -82,17 +134,14 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   elements.push(h2("2.2 中风险事项"));
   if (allMidRisks.length > 0) {
     allMidRisks.slice(0, 10).forEach(r => {
-      const prefix = r.label ? `${r.team}·${r.label}` : r.team;
-      elements.push(bullet(`${prefix}${r.text}`, { bold: '【中】' }));
+      const prefix = r.label ? `${r.team}-${r.label}` : r.team;
+      elements.push(bullet(`${prefix}${withSourceRef(r.text, r.source)}`, { bold: '【中】' }));
     });
   } else {
     elements.push(p("本期会议记录中未发现中风险事项。", { color: C.gray }));
   }
   elements.push(h2("2.3 风险矩阵"));
-  const allRisksForMatrix = [
-    ...allHighRisks.slice(0, 8).map(r => ({ text: r.text.substring(0, 60), level: '高', scope: r.label ? `${r.team}·${r.label}` : r.team })),
-    ...allMidRisks.slice(0, 5).map(r => ({ text: r.text.substring(0, 60), level: '中', scope: r.label ? `${r.team}·${r.label}` : r.team }))
-  ];
+  const allRisksForMatrix = makeRiskMatrixRows(allHighRisks, allMidRisks);
   if (allRisksForMatrix.length > 0) {
     elements.push(new Table({ columnWidths: [3500, 1800, 3726], rows: [
       new TableRow({ tableHeader: true, children: [hCell("风险项", 3500), hCell("等级", 1800), hCell("影响范围", 3726)] }),
@@ -115,11 +164,12 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
     }
   });
   if (allNear.length > 0) {
-    elements.push(new Table({ columnWidths: [1600, 2200, 5226], rows: [
-      new TableRow({ tableHeader: true, children: [hCell("时间节点", 1600), hCell("责任方", 2200), hCell("关键事项", 5226)] }),
+    elements.push(new Table({ columnWidths: [1200, 1600, 3400, 2826], rows: [
+      new TableRow({ tableHeader: true, children: [hCell("时间节点", 1200), hCell("责任方", 1600), hCell("关键事项", 3400), hCell("来源会议", 2826)] }),
       ...allNear.map(n => {
-        const owner = n.label ? `${n.team}·${n.label}` : (n.owner || n.team);
-        return new TableRow({ children: [cCell(n.dateStr, 1600), cCell(owner, 2200), cCell(n.text.substring(0, 100), 5226)] });
+        const owner = n.team;
+        const src = n.source || (n.label ? `${n.team}-${n.label}` : n.team);
+        return new TableRow({ children: [cCell(n.dateStr, 1200), cCell(owner, 1600), cCell(n.text.substring(0, 80), 3400), cCell(src, 2826)] });
       })
     ]}));
   } else {
@@ -137,11 +187,12 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
     }
   });
   if (allMidNodes.length > 0) {
-    elements.push(new Table({ columnWidths: [1600, 2200, 5226], rows: [
-      new TableRow({ tableHeader: true, children: [hCell("时间节点", 1600), hCell("责任方", 2200), hCell("关键事项", 5226)] }),
+    elements.push(new Table({ columnWidths: [1200, 1600, 3400, 2826], rows: [
+      new TableRow({ tableHeader: true, children: [hCell("时间节点", 1200), hCell("责任方", 1600), hCell("关键事项", 3400), hCell("来源会议", 2826)] }),
       ...allMidNodes.map(n => {
-        const owner = n.label ? `${n.team}·${n.label}` : (n.owner || n.team);
-        return new TableRow({ children: [cCell(n.dateStr, 1600), cCell(owner, 2200), cCell(n.text.substring(0, 100), 5226)] });
+        const owner = n.team;
+        const src = n.source || (n.label ? `${n.team}-${n.label}` : n.team);
+        return new TableRow({ children: [cCell(n.dateStr, 1200), cCell(owner, 1600), cCell(n.text.substring(0, 80), 3400), cCell(src, 2826)] });
       })
     ]}));
   } else {
@@ -153,23 +204,23 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   teamDataList.forEach(td => {
     if (td.labelAnalyses) {
       for (const [label, la] of td.labelAnalyses) {
-        const filtered = la.allTodos.filter(t => !nodeTexts.some(nt => textSimilar(t, nt) > 0.6));
-        dedupTexts(filtered).slice(0, 3).forEach(t => followItems.push({ team: `${td.teamName}·${label}`, text: t }));
+        const filtered = (la.allTodoItems || []).filter(item => !nodeTexts.some(nt => textSimilar(item.text, nt) > 0.6));
+        filtered.slice(0, 3).forEach(item => followItems.push({ team: `${td.teamName}-${label}`, text: sourcedItemText(item) }));
       }
     } else {
-      const filtered = td.analysis.allTodos.filter(t => !nodeTexts.some(nt => textSimilar(t, nt) > 0.6));
-      dedupTexts(filtered).slice(0, 4).forEach(t => followItems.push({ team: td.teamName, text: t }));
+      const filtered = (td.analysis.allTodoItems || []).filter(item => !nodeTexts.some(nt => textSimilar(item.text, nt) > 0.6));
+      filtered.slice(0, 4).forEach(item => followItems.push({ team: td.teamName, text: sourcedItemText(item) }));
     }
   });
   followItems.slice(0, 10).forEach(it => elements.push(bullet(it.text.substring(0, 100), { bold: `【${it.team}】` })));
 
-  elements.push(...buildFallbackSection4(teamDataList));
+  elements.push(...buildFallbackSection4(teamDataList, reportLimits));
   elements.push(...buildFallbackSection5(teamDataList, grandTotalDocs));
 
   return elements;
 }
 
-function buildFallbackSection4(teamDataList) {
+function buildFallbackSection4(teamDataList, reportLimits = getReportLimits()) {
   const elements = [];
   elements.push(pb(), h1("四、各团队会议汇总"));
   elements.push(p("本章节按团队进行划分，详细列出各模块的会议统计、核心议题与关键决议。"));
@@ -180,17 +231,17 @@ function buildFallbackSection4(teamDataList) {
       for (const [label, docs] of td.labelGroups) {
         elements.push(h3(`${label}（${docs.length}份）`));
         elements.push(p("核心议题：", { bold: true }));
-        dedupTexts(docs.flatMap(d => (d.conclusions || []).slice(0, 3).map(c => cleanText(c)).filter(isValidConclusion))).slice(0, 6).forEach(c => elements.push(bullet(c.substring(0, 150), { bold: `【${label}】` })));
+        docs.flatMap(d => (d.conclusions || []).slice(0, reportLimits.perDocumentItemLimit).map(c => ({ text: cleanText(c), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.multiSourceSectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220), { bold: `【${td.teamName}-${label}】` })));
         elements.push(p("关键决议：", { bold: true }));
-        dedupTexts(docs.flatMap(d => (d.todos || []).slice(0, 3).map(t => cleanText(t)).filter(isValidConclusion))).slice(0, 6).forEach(t => elements.push(bullet(t.substring(0, 150), { bold: `【${label}】` })));
+        docs.flatMap(d => (d.todos || []).slice(0, reportLimits.perDocumentItemLimit).map(t => ({ text: cleanText(t), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.multiSourceSectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220), { bold: `【${td.teamName}-${label}】` })));
       }
     } else {
       elements.push(h3("会议统计"));
       elements.push(p(`会议数量：${td.data.documents.length}份${td.analysis.importantCount > 0 ? `（其中重要会议${td.analysis.importantCount}份）` : ''}`, { bold: true }));
       elements.push(h3("核心议题"));
-      dedupTexts(td.data.documents.flatMap(d => (d.conclusions || []).slice(0, 3).map(c => cleanText(c)).filter(isValidConclusion))).slice(0, 8).forEach(c => elements.push(bullet(c.substring(0, 150))));
+      td.data.documents.flatMap(d => (d.conclusions || []).slice(0, reportLimits.perDocumentItemLimit).map(c => ({ text: cleanText(c), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.sectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
       elements.push(h3("关键决议"));
-      dedupTexts(td.data.documents.flatMap(d => (d.todos || []).slice(0, 3).map(t => cleanText(t)).filter(isValidConclusion))).slice(0, 8).forEach(t => elements.push(bullet(t.substring(0, 150))));
+      td.data.documents.flatMap(d => (d.todos || []).slice(0, reportLimits.perDocumentItemLimit).map(t => ({ text: cleanText(t), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.sectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
     }
   });
   return elements;
@@ -199,44 +250,71 @@ function buildFallbackSection4(teamDataList) {
 function buildFallbackSection5(teamDataList, grandTotalDocs) {
   const elements = [];
   elements.push(pb(), h1("五、综合评估与建议"));
-  elements.push(p(`基于本期${grandTotalDocs}份会议记录的综合分析，提出以下跨部门、跨项目的战略性评估与行动建议：`));
+
+  const analyses = teamDataList.flatMap(td =>
+    td.labelAnalyses ? [...td.labelAnalyses.values()] : [td.analysis]
+  );
+  const totalHighRisks = analyses.reduce((sum, a) => sum + (a.highRisks || []).length, 0);
+  const totalMidRisks = analyses.reduce((sum, a) => sum + (a.midRisks || []).length, 0);
+  const totalNearNodes = analyses.reduce((sum, a) => sum + (a.nearTermNodes || []).length, 0);
+  const totalMidNodes = analyses.reduce((sum, a) => sum + (a.midTermNodes || []).length, 0);
+  const totalTodos = analyses.reduce((sum, a) => sum + (a.totalTodos || 0), 0);
+  const totalConclusions = analyses.reduce((sum, a) => sum + (a.totalConclusions || 0), 0);
+
+  elements.push(h2("5.1 高度概况"));
+  const riskPart = totalHighRisks + totalMidRisks > 0
+    ? `识别高风险${totalHighRisks}项、中风险${totalMidRisks}项，`
+    : '未识别明显高、中风险事项，';
+  const nodePart = totalNearNodes + totalMidNodes > 0
+    ? `后续共有${totalNearNodes + totalMidNodes}个明确时间节点需跟踪。`
+    : '后续重点在于保持待办闭环。';
+  elements.push(p(`本期共纳入${grandTotalDocs}份会议记录，覆盖${teamDataList.length}个团队，${riskPart}${nodePart}`));
+
+  elements.push(h2("5.2 建议"));
+  const suggestions = [];
+  if (totalHighRisks > 0) {
+    suggestions.push('高风险事项应逐项明确责任人、截止时间和验收标准，优先完成闭环。');
+  }
+  if (totalMidRisks > 0) {
+    suggestions.push('中风险事项建议纳入周度跟踪清单，避免长期悬而未决。');
+  }
+  if (totalNearNodes + totalMidNodes > 0) {
+    suggestions.push('对近期和中期节点建立统一台账，按周更新进展和阻塞点。');
+  }
+  if (totalTodos > totalConclusions) {
+    suggestions.push('待办数量高于结论时，应加强会后决议确认，减少只记录不闭环的事项。');
+  }
+
   const strategic = generateStrategicAnalysis(teamDataList);
-  strategic.forEach((item, idx) => {
-    elements.push(h2(`5.${idx + 1} ${item.name}`));
-    elements.push(p(item.overview));
-    const high = item.teamStats.filter(t => t.level === 'high');
-    const mid = item.teamStats.filter(t => t.level === 'mid');
-    const low = item.teamStats.filter(t => t.level === 'low');
-    if (high.length > 0) {
-      const desc = high.map(t => `${t.team}（${t.meetingHits}场/${t.pct}%，${t.examples.slice(0, 2).join('；')}）`).join('、');
-      elements.push(bullet(`涉及较深：${desc}`, { bold: '推进较好：' }));
+  for (const item of strategic) {
+    if (suggestions.length >= 5) break;
+    if (!item.suggestion) continue;
+    const text = item.suggestion.replace(/^建议/, '').replace(/[；;].*$/, '').trim();
+    const normalized = `建议${text}`.replace(/。?$/, '。').substring(0, 120);
+    if (!suggestions.some(existing => textSimilar(existing, normalized) > 0.6)) {
+      suggestions.push(normalized);
     }
-    if (mid.length > 0) {
-      const desc = mid.map(t => `${t.team}（${t.meetingHits}场/${t.pct}%，${t.examples.slice(0, 2).join('；')}）`).join('、');
-      elements.push(bullet(`有涉及但深度有限：${desc}`, { bold: '推进一般：' }));
-    }
-    if (low.length > 0) {
-      const desc = low.map(t => `${t.team}（${t.meetingHits}场/${t.pct}%）`).join('、');
-      elements.push(bullet(`仅少量提及：${desc}`, { bold: '待加强：' }));
-    }
-    if (item.nodeDetail) {
-      elements.push(p('各团队近期关键节点：'));
-      for (const [team, nodes] of Object.entries(item.nodeDetail)) {
-        elements.push(bullet(nodes.join('；'), { bold: `${team}：` }));
-      }
-    }
-    elements.push(p(`建议：${item.suggestion}`, { bold: true }));
-  });
+  }
+  if (suggestions.length === 0) {
+    suggestions.push('建议持续关注各项待办事项的落地情况，确保会议结论形成可追踪闭环。');
+  }
+  suggestions.slice(0, 5).forEach(item => elements.push(bullet(item)));
   return elements;
 }
 
 // ========== 主函数 ==========
 async function main() {
   const args = process.argv.slice(2);
-  const startDate = normalizeDate(args[0] || "04-13");
-  const endDate = normalizeDate(args[1] || "04-26");
+  if (!args[0] || !args[1]) {
+    console.error('用法: node generate-comprehensive-report.js <start_date> <end_date>');
+    console.error('示例: node generate-comprehensive-report.js 04-13 04-26');
+    process.exit(1);
+  }
+  const startDate = normalizeDate(args[0]);
+  const endDate = normalizeDate(args[1]);
   const workspaceDir = resolveWorkspaceDir();
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf-8'));
+  const reportLimits = getReportLimits(config);
 
   const multiSourceNames = getMultiSourceTeamNames(config);
   const multiSourceSet = new Set(multiSourceNames);
@@ -246,12 +324,12 @@ async function main() {
   let allHighRisks = [], allMidRisks = [];
 
   for (const team of config.teams) {
-    const dataFile = path.join(workspaceDir, `team-summary-${team.name}.json`);
+    const dataFile = findInputFile(`team-summary-${team.name}.json`);
     let data;
     if (fs.existsSync(dataFile)) {
       data = JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
     } else {
-      const allFile = path.join(workspaceDir, 'all-team-summaries.json');
+      const allFile = findInputFile('all-team-summaries.json');
       if (!fs.existsSync(allFile)) { console.log(`跳过 ${team.name}：无数据文件`); continue; }
       const allData = JSON.parse(fs.readFileSync(allFile, 'utf-8'));
       const teamEntry = allData.find(t => t.team === team.name);
@@ -276,7 +354,7 @@ async function main() {
         tdEntry.labelGroups = groups;
         tdEntry.labelAnalyses = new Map();
         for (const [label, docs] of groups) {
-          const la = analyzeDocs(docs, `${team.name}-${label}`, { startDate, endDate });
+          const la = analyzeDocs(docs, team.name, { startDate, endDate, label });
           tdEntry.labelAnalyses.set(label, la);
           allHighRisks.push(...la.highRisks.map(r => ({ ...r, team: team.name, label })));
           allMidRisks.push(...la.midRisks.map(r => ({ ...r, team: team.name, label })));
@@ -301,35 +379,66 @@ async function main() {
   allMidRisks = allMidRisks.filter(mr => !allHighRisks.some(hr => textSimilar(hr.text, mr.text) > 0.5));
   allMidRisks = dedupRisks(allMidRisks);
 
+  let baseline = readMeetingBaseline(startDate, endDate);
+  if (!baseline) {
+    const written = writeMeetingBaseline(teamDataList, {
+      startDate,
+      endDate,
+      source: 'generate-comprehensive-report'
+    });
+    baseline = written.baseline;
+    console.log(`meeting-baseline: ${written.file}`);
+  }
+  const reportCounts = baselineCountsForReport(baseline, {
+    meetingListCount: grandTotalScanned,
+    successfulReadCount: grandTotalDocs,
+    analyzedDocumentCount: grandTotalDocs
+  });
+
   const teamCount = teamDataList.length;
-  const inclusionRate = grandTotalScanned > 0 ? Math.round((grandTotalDocs / grandTotalScanned) * 100) : 100;
+  const inclusionRate = reportCounts.meetingListCount > 0 ? Math.round((reportCounts.analyzedDocumentCount / reportCounts.meetingListCount) * 100) : 100;
   const now = new Date();
   const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
 
   // === 读取团队 LLM 摘要（两阶段模式） ===
   const teamSummaries = {};
   for (const td of teamDataList) {
-    const summaryFile = path.join(workspaceDir, `team-llm-summary-${td.teamName}.md`);
+    const summaryFile = findInputFile(`team-llm-summary-${td.teamName}.md`);
     if (fs.existsSync(summaryFile)) {
       teamSummaries[td.teamName] = fs.readFileSync(summaryFile, 'utf-8');
       console.log(`[${td.teamName}] 使用已有 LLM 摘要 (${(teamSummaries[td.teamName].length / 1024).toFixed(1)}KB)`);
     }
   }
   const hasSummaries = Object.keys(teamSummaries).length > 0;
+  const compactComprehensiveSummaries = !(config.llm && config.llm.compactComprehensiveSummaries === false);
+  const maxTeamSummaryChars = Number(config.llm && config.llm.maxTeamSummaryChars) || 2600;
+  if (hasSummaries && compactComprehensiveSummaries) {
+    const compacted = compactTeamSummariesForComprehensive(teamSummaries, { maxCharsPerTeam: maxTeamSummaryChars });
+    const stats = summarizeTeamSummaryCompression(teamSummaries, compacted);
+    console.log(`综合报告摘要预压缩: ${(stats.rawChars / 1024).toFixed(1)}KB -> ${(stats.compactChars / 1024).toFixed(1)}KB (${stats.ratio}%, 每团队上限 ${maxTeamSummaryChars} 字符)`);
+  } else if (hasSummaries) {
+    console.log('综合报告摘要预压缩: 已关闭');
+  }
 
   // === LLM 生成全部分析内容（1.2-5章），回退到规则分析 ===
   let analyticalElements;
   let llmTruncated = false;
+  let generationMode = 'unknown';
+  const ruleFallbackSections = [];
   const prompt = buildComprehensiveReportPrompt(teamDataList, {
-    startDate, endDate, grandTotalDocs, teamCount,
+    startDate, endDate, grandTotalDocs: reportCounts.analyzedDocumentCount, teamCount,
     teamSummaries: hasSummaries ? teamSummaries : undefined,
+    compactTeamSummaries: compactComprehensiveSummaries,
+    maxTeamSummaryChars,
+    reportLimits,
     multiSourceTeamNames: multiSourceNames
   });
   console.log(`调用 LLM 生成全部分析（${(prompt.length / 1024).toFixed(1)}KB prompt${hasSummaries ? '，两阶段模式' : ''}）...`);
-  const llmResult = await callLLM(prompt, config);
+  let llmResult = await callLLM(prompt, config);
   if (llmResult) {
+    llmResult = normalizeMultiSourceBulletPrefixes(llmResult, multiSourceNames);
     console.log(`LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB，解析中...`);
-    const summaryFile = path.join(workspaceDir, `comprehensive-llm-summary-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.md`);
+    const summaryFile = outputPath(`comprehensive-llm-summary-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.md`);
     fs.writeFileSync(summaryFile, llmResult, 'utf-8');
     console.log(`LLM 原始输出已保存: ${path.basename(summaryFile)}`);
     const hasSection5 = /^#\s+五|^##\s*5[.、]/.test(llmResult) || /综合评估|建议/.test(llmResult.substring(llmResult.length - 2000));
@@ -338,29 +447,34 @@ async function main() {
       llmTruncated = true;
     }
     analyticalElements = parseReportMarkdown(llmResult);
+    if (analyticalElements && analyticalElements.length > 0) generationMode = llmTruncated ? 'llm-with-rules-supplement' : 'llm';
   }
   if (!analyticalElements || analyticalElements.length === 0) {
     console.log('LLM 不可用或返回为空，使用规则分析...');
-    analyticalElements = buildFallbackContent(teamDataList, allHighRisks, allMidRisks, { grandTotalDocs, startDate, endDate, multiSourceSet });
+    generationMode = 'rules-fallback';
+    analyticalElements = buildFallbackContent(teamDataList, allHighRisks, allMidRisks, { grandTotalDocs: reportCounts.analyzedDocumentCount, startDate, endDate, multiSourceSet, reportLimits });
   } else if (llmTruncated) {
     const hasFourInLlm = llmResult && /^#\s+四|各.*团队.*会议汇总/m.test(llmResult);
     const hasFiveInLlm = llmResult && /^#\s+五|综合评估与建议/m.test(llmResult);
     if (!hasFourInLlm) {
       console.log('补充第四、五部分（规则回退）...');
-      analyticalElements.push(...buildFallbackSection4(teamDataList));
-      analyticalElements.push(...buildFallbackSection5(teamDataList, grandTotalDocs));
+      ruleFallbackSections.push('section4', 'section5');
+      analyticalElements.push(...buildFallbackSection4(teamDataList, reportLimits));
+      analyticalElements.push(...buildFallbackSection5(teamDataList, reportCounts.analyzedDocumentCount));
     } else if (!hasFiveInLlm) {
       console.log('补充第五部分（综合评估与建议，规则回退）...');
-      analyticalElements.push(...buildFallbackSection5(teamDataList, grandTotalDocs));
+      ruleFallbackSections.push('section5');
+      analyticalElements.push(...buildFallbackSection5(teamDataList, reportCounts.analyzedDocumentCount));
     }
   }
+  console.log(`综合报告生成模式: ${generationMode === 'llm' ? 'LLM' : generationMode === 'rules-fallback' ? '规则回退' : generationMode}`);
 
   const dateLabel = `${now.getFullYear()}年${formatDateChinese(startDate)} - ${formatDateChinese(endDate)}`;
   const coverSection = makeCoverPage({
     title1: '会议记录', title2: '汇总分析报告',
     subtitle: '（综合版）',
     dateRange: dateLabel,
-    stats: [`共收录 ${grandTotalDocs} 份会议记录`, `覆盖 ${teamCount} 个团队`],
+    stats: [`Meeting list ${reportCounts.meetingListCount}`, `Analyzed ${reportCounts.analyzedDocumentCount}`, `Teams ${teamCount}`],
     editDate: dateStr
   });
 
@@ -378,14 +492,16 @@ async function main() {
           h2("1.1 核心发现"),
           new Table({ columnWidths: [3000, 6026], rows: [
             new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 6026)] }),
-            new TableRow({ children: [cCell("会议记录总数", 3000), cCell(`${grandTotalDocs}份`, 6026)] }),
+            new TableRow({ children: [cCell("会议清单数", 3000), cCell(`${reportCounts.meetingListCount}条`, 6026)] }),
+            new TableRow({ children: [cCell("成功读取数", 3000), cCell(`${reportCounts.successfulReadCount}份`, 6026)] }),
+            new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 6026)] }),
             new TableRow({ children: [cCell("覆盖团队数", 3000), cCell(`${teamCount}个`, 6026)] }),
             new TableRow({ children: [cCell("时间跨度", 3000), cCell(`${now.getFullYear()}.${startDate} - ${endDate}`, 6026)] }),
             new TableRow({ children: [cCell("核心议题数量", 3000), cCell(`${grandTotalConclusions}`, 6026)] }),
             new TableRow({ children: [cCell("关键决议数量", 3000), cCell(`${grandTotalTodos}`, 6026)] })
           ]}),
           new Paragraph({ spacing: { before: 200 }, children: [] }),
-          p(`本报告涵盖${teamDataList.map(t => t.teamName).join('、')}共${teamCount}个团队，共收录${grandTotalDocs}份会议记录。所有内容均基于实际会议记录文档提取，团队分类严格按配置映射关系归类。`),
+          p(`本报告涵盖${teamDataList.map(t => t.teamName).join('、')}共${teamCount}个团队；会议清单共${reportCounts.meetingListCount}条，成功读取${reportCounts.successfulReadCount}份，纳入分析${reportCounts.analyzedDocumentCount}份。所有内容均基于实际会议记录文档提取，团队分类严格按配置映射关系归类。`),
 
           ...analyticalElements,
 
@@ -414,9 +530,10 @@ async function main() {
           h2("纳入率统计"),
           new Table({ columnWidths: [3000, 3013, 3013], rows: [
             new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 3013), hCell("说明", 3013)] }),
-            new TableRow({ children: [cCell("日期范围内文档数", 3000), cCell(`${grandTotalScanned}份`, 3013, { bold: true }), cCell("用户输入日期内所有文件", 3013)] }),
-            new TableRow({ children: [cCell("已纳入分析文档数", 3000), cCell(`${grandTotalDocs}份`, 3013, { bold: true }), cCell("成功解析的文档", 3013)] }),
-            new TableRow({ children: [cCell("文档纳入率", 3000), cCell(`${inclusionRate}%`, 3013, { bold: true }), cCell(`${grandTotalDocs}/${grandTotalScanned}`, 3013)] })
+            new TableRow({ children: [cCell("会议清单数", 3000), cCell(`${reportCounts.meetingListCount}条`, 3013, { bold: true }), cCell("统一数据基线中的会议条目", 3013)] }),
+            new TableRow({ children: [cCell("成功读取数", 3000), cCell(`${reportCounts.successfulReadCount}份`, 3013, { bold: true }), cCell("成功读取正文或提取结构化内容的文档", 3013)] }),
+            new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 3013, { bold: true }), cCell("进入正文分析与附录统计的文档", 3013)] }),
+            new TableRow({ children: [cCell("文档纳入率", 3000), cCell(`${inclusionRate}%`, 3013, { bold: true }), cCell(`${reportCounts.analyzedDocumentCount}/${reportCounts.meetingListCount}`, 3013)] })
           ]}),
           new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "— 报告完 —", color: C.gray, size: 20, font: FONT })] })
         ]
@@ -425,13 +542,13 @@ async function main() {
   });
 
   const buffer = await Packer.toBuffer(doc);
-  const outFile = path.join(workspaceDir, `综合分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
+  const outFile = outputPath(`综合分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
   try {
     fs.writeFileSync(outFile, buffer);
   } catch (e) {
     if (e.code === 'EBUSY') {
       const ts = new Date().toISOString().replace(/[T:]/g, '-').substring(0, 16);
-      const altFile = path.join(workspaceDir, `综合分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
+      const altFile = outputPath(`综合分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
       fs.writeFileSync(altFile, buffer);
       console.log(`原文件被占用，已另存为: ${path.basename(altFile)}`);
       console.log(`综合报告已生成: ${(buffer.length / 1024).toFixed(1)}KB -> ${path.basename(altFile)}`);
@@ -439,6 +556,21 @@ async function main() {
     }
     throw e;
   }
+  const statsFile = writeOutputJson('comprehensive-report-generation-stats.json', {
+    type: 'comprehensive-report',
+    startDate,
+    endDate,
+    generatedAt: new Date().toISOString(),
+    mode: generationMode,
+    ruleFallbackSections,
+    llmUsed: generationMode === 'llm' || generationMode === 'llm-with-rules-supplement',
+    rulesFallbackUsed: generationMode === 'rules-fallback' || ruleFallbackSections.length > 0,
+    output: path.basename(outFile),
+    baseline: baseline.counts,
+    documents: reportCounts.analyzedDocumentCount,
+    teams: teamCount
+  });
+  console.log(`综合报告生成模式统计: ${statsFile}`);
   console.log(`综合报告已生成: ${(buffer.length / 1024).toFixed(1)}KB -> ${path.basename(outFile)}`);
 }
 

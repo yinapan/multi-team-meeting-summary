@@ -1,14 +1,42 @@
 const path = require('path');
 const fs = require('fs');
-const { execSync, execFile, execFileSync } = require('child_process');
+const crypto = require('crypto');
+const { execFile, execFileSync } = require('child_process');
 
-const KDOCS_CLI = process.env.KDOCS_CLI_PATH || (process.platform === 'win32' ? path.join(process.env.LOCALAPPDATA || '', 'kdocs-cli', 'kdocs-cli.exe') : 'kdocs-cli');
+let cachedSkillConfig = null;
+
+function getSkillConfig() {
+  if (cachedSkillConfig) return cachedSkillConfig;
+  const configFile = path.join(__dirname, '..', 'config.json');
+  try {
+    cachedSkillConfig = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+  } catch (_) {
+    cachedSkillConfig = {};
+  }
+  return cachedSkillConfig;
+}
+
+function getKdocsConfig() {
+  return getSkillConfig().kdocs || {};
+}
+
+function getKdocsCliPath() {
+  const cfg = getKdocsConfig();
+  const defaultWindowsPath = path.join(require('os').homedir(), 'AppData', 'Local', 'kdocs-cli', 'kdocs-cli.exe');
+  return cfg.cliPath || (process.platform === 'win32' ? defaultWindowsPath : 'kdocs-cli');
+}
+
+function getKdocsCliEnv() {
+  const cfg = getKdocsConfig();
+  const env = { ...process.env };
+  if (cfg.token) env.KINGSOFT_DOCS_TOKEN = cfg.token;
+  return env;
+}
 
 try {
   require.resolve('docx');
 } catch (_) {
-  console.log('首次运行，安装依赖...');
-  execSync('npm install --production', { cwd: path.join(__dirname, '..'), stdio: 'inherit' });
+  throw new Error('缺少 npm 依赖 docx，请先运行 npm install 或 node scripts/setup.js');
 }
 
 const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
@@ -17,10 +45,11 @@ const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
 
 // ========== 缓存 ==========
 const CACHE_DIR = path.join(__dirname, '..', 'cache');
-const FOLDER_CACHE_TTL = parseInt(process.env.KDOCS_CACHE_TTL_MS, 10) || 3600000;
+const FOLDER_CACHE_TTL = Number(getKdocsConfig().cacheTtlMs) || 3600000;
 const RETRY_CODES = new Set([429001, 429002, 429003]);
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 2000;
+const MAX_RETRIES = 6;
+const BASE_DELAY_MS = 3000;
+const MAX_DELAY_MS = 30000;
 
 function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end); }
@@ -33,11 +62,30 @@ function sleep(ms) {
 // ========== 异步并发控制 ==========
 class RequestPacer {
   constructor(options = {}) {
-    this.maxConcurrent = parseInt(process.env.KDOCS_FOLDER_CONCURRENCY, 10) || options.maxConcurrent || 3;
-    this.minIntervalMs = parseInt(process.env.KDOCS_MIN_INTERVAL_MS, 10) || options.minIntervalMs || 300;
+    const cfg = getKdocsConfig();
+    this.maxConcurrent = options.maxConcurrent || Number(cfg.folderConcurrency) || 2;
+    this.minIntervalMs = options.minIntervalMs || Number(cfg.minIntervalMs) || 1000;
+    this.rateLimitCooldownMs = options.rateLimitCooldownMs || Number(cfg.rateLimitCooldownMs) || 30000;
+    this.currentIntervalMs = this.minIntervalMs;
+    this.adaptiveMaxIntervalMs = options.adaptiveMaxIntervalMs || Number(cfg.adaptiveMaxIntervalMs) || 3000;
+    this.adaptiveStepMs = options.adaptiveStepMs || Number(cfg.adaptiveStepMs) || 500;
+    this.recoverySuccesses = options.recoverySuccesses || Number(cfg.recoverySuccesses) || 20;
+    this.successSinceRateLimit = 0;
     this.active = 0;
     this.queue = [];
     this.lastRequestTime = 0;
+    this.cooldownUntil = 0;
+    this.stats = {
+      requests: 0,
+      searchRequests: 0,
+      listRequests: 0,
+      readRequests: 0,
+      rateLimits: 0,
+      retries: 0,
+      staleCacheFallbacks: 0,
+      cacheHits: 0,
+      apiFetches: 0
+    };
   }
 
   acquire() {
@@ -48,9 +96,13 @@ class RequestPacer {
           return;
         }
         const now = Date.now();
+        if (now < this.cooldownUntil) {
+          setTimeout(tryRun, this.cooldownUntil - now);
+          return;
+        }
         const elapsed = now - this.lastRequestTime;
-        if (elapsed < this.minIntervalMs) {
-          setTimeout(tryRun, this.minIntervalMs - elapsed);
+        if (elapsed < this.currentIntervalMs) {
+          setTimeout(tryRun, this.currentIntervalMs - elapsed);
           return;
         }
         this.active++;
@@ -59,6 +111,52 @@ class RequestPacer {
       };
       tryRun();
     });
+  }
+
+  noteRateLimit(cooldownMs = this.rateLimitCooldownMs) {
+    this.stats.rateLimits++;
+    this.successSinceRateLimit = 0;
+    this.currentIntervalMs = Math.min(this.adaptiveMaxIntervalMs, this.currentIntervalMs + this.adaptiveStepMs);
+    this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + cooldownMs);
+  }
+
+  noteSuccess() {
+    if (this.currentIntervalMs <= this.minIntervalMs) return;
+    this.successSinceRateLimit++;
+    if (this.successSinceRateLimit >= this.recoverySuccesses) {
+      this.currentIntervalMs = Math.max(this.minIntervalMs, this.currentIntervalMs - this.adaptiveStepMs);
+      this.successSinceRateLimit = 0;
+    }
+  }
+
+  noteRetry() {
+    this.stats.retries++;
+  }
+
+  noteStaleCacheFallback() {
+    this.stats.staleCacheFallbacks++;
+  }
+
+  noteCacheHit() {
+    this.stats.cacheHits++;
+  }
+
+  noteApiFetch() {
+    this.stats.apiFetches++;
+  }
+
+  noteRequest(kind = 'requests') {
+    this.stats.requests++;
+    const key = `${kind}Requests`;
+    if (Object.prototype.hasOwnProperty.call(this.stats, key)) this.stats[key]++;
+  }
+
+  getCurrentIntervalMs() {
+    return this.currentIntervalMs;
+  }
+
+  getStats() {
+    return { ...this.stats, currentIntervalMs: this.currentIntervalMs };
   }
 
   release() {
@@ -90,7 +188,10 @@ function readCache(filePath) {
   try {
     if (!fs.existsSync(filePath)) return null;
     return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  } catch { return null; }
+  } catch (e) {
+    process.stderr.write(`[readCache] ${path.basename(filePath)}: ${e.message.substring(0, 80)}\n`);
+    return null;
+  }
 }
 
 function writeCache(filePath, data) {
@@ -98,7 +199,9 @@ function writeCache(filePath, data) {
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify(data), 'utf-8');
-  } catch {}
+  } catch (e) {
+    process.stderr.write(`[writeCache] ${path.basename(filePath)}: ${e.message.substring(0, 80)}\n`);
+  }
 }
 
 function clearFolderCache(teamName) {
@@ -107,7 +210,9 @@ function clearFolderCache(teamName) {
     if (fs.existsSync(dir)) {
       for (const f of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, f));
     }
-  } catch {}
+  } catch (e) {
+    process.stderr.write(`[clearFolderCache] ${teamName}: ${e.message.substring(0, 80)}\n`);
+  }
 }
 
 // ========== 样式常量 ==========
@@ -284,20 +389,145 @@ function formatDateChinese(mmdd) {
   return `${parseInt(m[1])}月${parseInt(m[2])}日`;
 }
 
-function extractDateFromFileName(fileName) {
-  const yearStr = String(currentYear());
-  const yearRe = new RegExp(yearStr + '[.\\-]?(\\d{2})[.\\-]?(\\d{2})');
-  let match = fileName.match(yearRe);
-  if (match) return { month: parseInt(match[1]), day: parseInt(match[2]) };
+function validMonthDay(month, day) {
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
 
-  match = fileName.match(/(\d{1,2})月(\d{1,2})[日号]?/);
-  if (match) return { month: parseInt(match[1]), day: parseInt(match[2]) };
+function extractDateFromFileName(fileName) {
+  const year = currentYear();
+  const yearStr = String(year);
+  const prevYearStr = String(year - 1);
+  const shortYearStr = yearStr.slice(-2);
+  const prevShortYearStr = prevYearStr.slice(-2);
+
+  function makeDate(monthValue, dayValue) {
+    const month = parseInt(monthValue, 10);
+    const day = parseInt(dayValue, 10);
+    return validMonthDay(month, day) ? { month, day } : null;
+  }
+
+  // 匹配当前年份: 20260428, 2026-04-28, 2026.04.28
+  const yearRe = new RegExp(yearStr + '[.\\-]?(\\d{1,2})[.\\-]?(\\d{2})');
+  let match = fileName.match(yearRe);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
+  // 匹配前一年: 20251228（跨年场景）
+  const prevYearRe = new RegExp(prevYearStr + '[.\\-]?(\\d{1,2})[.\\-]?(\\d{2})');
+  match = fileName.match(prevYearRe);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
+  // 匹配两位年份: 260506, 26.3.30, 26-04-20
+  const shortYearRe = new RegExp(`(?:^|\\D)(?:${shortYearStr}|${prevShortYearStr})[.\\-]?(\\d{1,2})[.\\-]?(\\d{2})(?=\\D|$)`);
+  match = fileName.match(shortYearRe);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
+  // 匹配中文格式: 2026 年 4 月 20 日、4月28日
+  match = fileName.match(/(?:\d{4}\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?/);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
+  // 匹配无年份的 M.D / MM-DD 格式: 5.11 xxx, 04-20会议纪要
+  match = fileName.match(/(?:^|[^\d])(\d{1,2})[.\-](\d{1,2})(?=\D|$)/);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
+  // 匹配无年份的 MMDD 格式（仅当前缀是4位数字且不像年份时）: 0428-xxx
+  match = fileName.match(/^(\d{2})(\d{2})\s*[\-—–]/);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
 
   return null;
 }
 
-function dateInRange(fileName, startDate, endDate) {
-  const fileDate = extractDateFromFileName(fileName);
+function extractDateFromContent(markdown) {
+  const text = String(markdown || '').replace(/\r\n/g, '\n');
+  const year = currentYear();
+  const yearStr = String(year);
+  const prevYearStr = String(year - 1);
+  const lines = text.split('\n');
+  const dateLabelRe = /会议\s*(?:时间|日期)|开会\s*时间|召开\s*时间|(?:^|\|)\s*(?:时间|日期)\s*(?:[：:]|\|)/;
+
+  function makeDate(monthValue, dayValue) {
+    const month = parseInt(monthValue, 10);
+    const day = parseInt(dayValue, 10);
+    return validMonthDay(month, day) ? { month, day } : null;
+  }
+
+  function dateFromLine(line, options = {}) {
+    const { allowNoYear = false, startOnly = false } = options;
+    const prefix = startOnly ? '^\\s*(?:#{1,6}\\s*)?' : '';
+    const currentOrPrev = `(?:${yearStr}|${prevYearStr})`;
+    const patterns = [
+      new RegExp(`${prefix}${currentOrPrev}(\\d{2})(\\d{2})(?=\\D|$)`),
+      new RegExp(`${prefix}${currentOrPrev}\\s*[.\\-/年]\\s*(\\d{1,2})\\s*[.\\-/月]\\s*(\\d{1,2})`)
+    ];
+
+    if (allowNoYear) {
+      patterns.push(
+        /(?:^|[^\d])(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?/,
+        /(?:^|[^\d])(\d{1,2})[.\-/](\d{1,2})(?=\D|$)/
+      );
+    }
+
+    for (const pattern of patterns) {
+      const match = String(line || '').match(pattern);
+      if (!match) continue;
+      const date = makeDate(match[1], match[2]);
+      if (date) return date;
+    }
+    return null;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!dateLabelRe.test(line)) continue;
+
+    const sameLineDate = dateFromLine(line, { allowNoYear: true });
+    if (sameLineDate) return sameLineDate;
+
+    for (let j = i + 1; j < Math.min(lines.length, i + 5); j++) {
+      const current = lines[j].trim();
+      if (!current) continue;
+      if (/^\s{0,3}#{1,6}\s*/.test(current) && !dateFromLine(current, { allowNoYear: true })) break;
+      if (/参会|与会|出席|会议记录|会议纪要|正文/.test(current) && !dateFromLine(current, { allowNoYear: true })) break;
+      const date = dateFromLine(current, { allowNoYear: true });
+      if (date) return date;
+    }
+  }
+
+  let nonEmptyCount = 0;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    nonEmptyCount++;
+    if (nonEmptyCount > 5) break;
+    const date = dateFromLine(line, { startOnly: true });
+    if (date) return date;
+  }
+
+  return null;
+}
+
+function extractMeetingDate(fileName, markdown = '') {
+  return extractDateFromFileName(fileName) || extractDateFromContent(markdown);
+}
+
+function dateInRange(fileName, startDate, endDate, markdown = '') {
+  const fileDate = extractMeetingDate(fileName, markdown);
   if (!fileDate) return false;
   const startMatch = startDate.match(/(\d{1,2})[.\-](\d{1,2})/);
   const endMatch = endDate.match(/(\d{1,2})[.\-](\d{1,2})/);
@@ -312,8 +542,8 @@ function dateInRange(fileName, startDate, endDate) {
   return fileNum >= startNum || fileNum <= endNum;
 }
 
-function getWeekKey(fileName) {
-  const d = extractDateFromFileName(fileName);
+function getWeekKey(fileName, markdown = '') {
+  const d = extractMeetingDate(fileName, markdown);
   if (!d) return 'unknown';
   const date = new Date(currentYear(), d.month - 1, d.day);
   const dayOfWeek = date.getDay();
@@ -336,13 +566,13 @@ function listFolder(driveId, parentId, teamName) {
   const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const raw = execFileSync(KDOCS_CLI, ['drive', 'list-files', '--output', 'json'], {
-        input: inputJson, encoding: 'utf-8', timeout: 15000, windowsHide: true
+      const raw = execFileSync(getKdocsCliPath(), ['drive', 'list-files', '--output', 'json'], {
+        input: inputJson, encoding: 'utf-8', timeout: 15000, windowsHide: true, env: getKdocsCliEnv()
       });
       const parsed = JSON.parse(raw);
       if (parsed && parsed.code && parsed.code !== 0) {
         if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+          const delay = retryDelay(attempt);
           process.stderr.write(`[listFolder] 限流 folder=${parentId} code=${parsed.code}，${(delay / 1000).toFixed(0)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...\n`);
           sleepSync(delay);
           continue;
@@ -356,7 +586,7 @@ function listFolder(driveId, parentId, teamName) {
       return items;
     } catch (e) {
       if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        const delay = retryDelay(attempt);
         process.stderr.write(`[listFolder] 异常 folder=${parentId}，${(delay / 1000).toFixed(0)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...\n`);
         sleepSync(delay);
         continue;
@@ -395,13 +625,174 @@ function scanFolderWithStats(driveId, folderId, startDate, endDate, teamName) {
       files.push(...sub.files);
       totalScanned += sub.totalScanned;
     } else if (item.type === 'file' && /\.(otl|docx)$/i.test(item.name)) {
+      totalScanned++;
       if (dateInRange(item.name, startDate, endDate)) {
-        totalScanned++;
         files.push({ name: item.name, id: item.id, link: item.link_url, size: item.size, drive_id: driveId, mtime: item.mtime });
       }
     }
   }
   return { files, totalScanned };
+}
+
+function kdocsFileKey(file) {
+  return String((file && (file.id || file.link || file.name)) || '');
+}
+
+function dedupeKdocsFiles(files) {
+  const seen = new Set();
+  const result = [];
+  for (const file of files || []) {
+    const key = kdocsFileKey(file);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(file);
+  }
+  return result;
+}
+
+function getKdocsScanMode() {
+  const cfg = getKdocsConfig();
+  if (cfg.scanMode) return String(cfg.scanMode).toLowerCase();
+  if (cfg.recursiveScan === false) return 'search';
+  if (cfg.recursiveScan === true) return 'recursive';
+  return 'recursive';
+}
+
+let cachedDirectoryRiskProfile = null;
+function getDirectoryRiskProfile() {
+  if (cachedDirectoryRiskProfile) return cachedDirectoryRiskProfile;
+  const profile = { teamFolderCounts: {}, sourceFolderCounts: {} };
+  const file = path.join(resolveWorkspaceDir(), 'kdocs-directory-tree.json');
+  try {
+    if (!fs.existsSync(file)) {
+      cachedDirectoryRiskProfile = profile;
+      return profile;
+    }
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    for (const row of data.rows || []) {
+      if (row.type !== 'folder') continue;
+      const team = row.team || '';
+      const source = row.source || '';
+      if (team) profile.teamFolderCounts[team] = (profile.teamFolderCounts[team] || 0) + 1;
+      if (team && source) {
+        const key = `${team}::${source}`;
+        profile.sourceFolderCounts[key] = (profile.sourceFolderCounts[key] || 0) + 1;
+      }
+    }
+  } catch (e) {
+    process.stderr.write(`[directoryRiskProfile] 读取失败: ${e.message.substring(0, 100)}\n`);
+  }
+  cachedDirectoryRiskProfile = profile;
+  return profile;
+}
+
+function shouldHybridRecursiveScan(teamName, sourceLabel) {
+  const cfg = getKdocsConfig();
+  const threshold = Number(cfg.hybridFolderThreshold ?? cfg.hybridRecursiveFolderThreshold ?? 5);
+  const explicitTeams = new Set([
+    '运营发行中心',
+    '行政管理部',
+    ...(cfg.hybridRecursiveTeams || []),
+    ...(cfg.recursiveFallbackTeams || [])
+  ]);
+  const explicitLabels = new Set([
+    'K2运营发行部',
+    ...(cfg.hybridRecursiveLabels || []),
+    ...(cfg.recursiveFallbackLabels || [])
+  ]);
+
+  if (explicitTeams.has(teamName) || explicitLabels.has(sourceLabel)) return true;
+
+  const profile = getDirectoryRiskProfile();
+  const teamFolders = profile.teamFolderCounts[teamName] || 0;
+  const sourceFolders = profile.sourceFolderCounts[`${teamName}::${sourceLabel}`] || 0;
+  return teamFolders >= threshold || sourceFolders >= threshold;
+}
+
+async function scanFilesByMode(entry, options) {
+  const {
+    teamName,
+    startDate,
+    endDate,
+    pacer,
+    mode = getKdocsScanMode(),
+    includeAll = false,
+    fromDate = null
+  } = options || {};
+  const driveId = entry.source.drive_id;
+  const folderId = entry.folderId;
+  const label = entry.label || teamName;
+  const normalizedMode = String(mode || 'recursive').toLowerCase();
+  const stats = {
+    mode: normalizedMode,
+    searchCount: 0,
+    recursiveCount: 0,
+    mergedCount: 0,
+    recursiveSupplementCount: 0,
+    usedRecursive: false,
+    totalScanned: 0
+  };
+
+  async function searchMatched() {
+    const files = await searchFilesAsyncRateLimited({
+      drive_ids: [driveId],
+      parent_ids: [folderId],
+      file_exts: ['otl', 'docx'],
+      with_link: true
+    }, teamName, pacer);
+    return includeAll
+      ? files
+      : files.filter(f => dateInRange(f.name, startDate, endDate));
+  }
+
+  async function recursiveMatched() {
+    stats.usedRecursive = true;
+    if (includeAll) {
+      const files = fromDate
+        ? await scanFolderFromDateAsync(driveId, folderId, fromDate.month, fromDate.day, teamName, pacer)
+        : await scanFolderAllAsync(driveId, folderId, teamName, pacer);
+      stats.recursiveCount = files.length;
+      stats.totalScanned = files.length;
+      return files;
+    }
+    const result = await scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, teamName, pacer);
+    stats.recursiveCount = result.files.length;
+    stats.totalScanned = result.totalScanned;
+    return result.files;
+  }
+
+  let files = [];
+  if (normalizedMode === 'recursive') {
+    files = await recursiveMatched();
+  } else if (normalizedMode === 'search') {
+    files = await searchMatched();
+    stats.searchCount = files.length;
+    stats.totalScanned = files.length;
+  } else {
+    let searchFiles = [];
+    try {
+      searchFiles = await searchMatched();
+      stats.searchCount = searchFiles.length;
+    } catch (e) {
+      process.stderr.write(`[hybrid-scan] search 失败 ${teamName}/${entry.monthName}: ${e.message.substring(0, 120)}\n`);
+    }
+
+    const needsRecursive = shouldHybridRecursiveScan(teamName, label) || searchFiles.length === 0;
+    if (needsRecursive) {
+      const recursiveFiles = await recursiveMatched();
+      const searchKeys = new Set(searchFiles.map(kdocsFileKey).filter(Boolean));
+      stats.recursiveSupplementCount = recursiveFiles.filter(f => !searchKeys.has(kdocsFileKey(f))).length;
+      files = dedupeKdocsFiles([...searchFiles, ...recursiveFiles]);
+      stats.totalScanned = Math.max(stats.totalScanned, files.length);
+    } else {
+      files = searchFiles;
+      stats.totalScanned = searchFiles.length;
+    }
+  }
+
+  files = dedupeKdocsFiles(files);
+  stats.mergedCount = files.length;
+  return { files, stats };
 }
 
 function scanFolderAll(driveId, folderId, teamName) {
@@ -420,8 +811,8 @@ function scanFolderAll(driveId, folderId, teamName) {
 // ========== 异步版本 KDocs 扫描 ==========
 function spawnKdocsCli(args, inputJson, timeout) {
   return new Promise((resolve) => {
-    const child = require('child_process').spawn(KDOCS_CLI, args, {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
+    const child = require('child_process').spawn(getKdocsCliPath(), args, {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
     });
     let stdout = '';
     let stderr = '';
@@ -445,6 +836,22 @@ function spawnKdocsCli(args, inputJson, timeout) {
   });
 }
 
+function retryDelay(attempt) {
+  const base = Math.min(BASE_DELAY_MS * Math.pow(2, attempt), MAX_DELAY_MS);
+  return base + Math.floor(Math.random() * 1000);
+}
+
+async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests') {
+  if (!pacer) return spawnKdocsCli(args, inputJson, timeout);
+  await pacer.acquire();
+  try {
+    if (typeof pacer.noteRequest === 'function') pacer.noteRequest(kind);
+    return await spawnKdocsCli(args, inputJson, timeout);
+  } finally {
+    pacer.release();
+  }
+}
+
 async function listFolderAsync(driveId, parentId, teamName, pacer) {
   const cacheFile = path.join(teamFoldersCacheDir(teamName), `${driveId}_${parentId}.json`);
   const cached = readCache(cacheFile);
@@ -452,55 +859,60 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
     return cached.items;
   }
 
-  await pacer.acquire();
-  try {
-    const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const { error, stdout } = await spawnKdocsCli(
-        ['drive', 'list-files', '--output', 'json'], inputJson, 15000
-      );
-      if (error && !stdout) {
-        if (attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-          process.stderr.write(`[listFolderAsync] 异常 folder=${parentId}，${(delay / 1000).toFixed(0)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...\n`);
-          await sleep(delay);
-          continue;
-        }
-        process.stderr.write(`[listFolderAsync] 失败 folder=${parentId}: ${error.substring(0, 100)}\n`);
-        if (cached) return cached.items;
-        return [];
+  const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const { error, stdout } = await pacedKdocsCli(
+      pacer,
+      ['drive', 'list-files', '--output', 'json'],
+      inputJson,
+      15000,
+      'list'
+    );
+    if (error && !stdout) {
+      if (attempt < MAX_RETRIES) {
+        if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+        const delay = retryDelay(attempt);
+        process.stderr.write(`[listFolderAsync] error folder=${parentId}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
+        await sleep(delay);
+        continue;
       }
-      try {
-        const parsed = JSON.parse(stdout);
-        if (parsed && parsed.code && parsed.code !== 0) {
-          if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
-            const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-            process.stderr.write(`[listFolderAsync] 限流 folder=${parentId} code=${parsed.code}，${(delay / 1000).toFixed(0)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...\n`);
-            await sleep(delay);
-            continue;
-          }
-          process.stderr.write(`[listFolderAsync] API错误 folder=${parentId} code=${parsed.code}\n`);
-          if (cached) return cached.items;
-          return [];
-        }
-        const items = (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
-        writeCache(cacheFile, { items, fetched_at: Date.now() });
-        return items;
-      } catch (e) {
-        if (attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-          await sleep(delay);
-          continue;
-        }
-        if (cached) return cached.items;
-        return [];
-      }
+      process.stderr.write(`[listFolderAsync] failed folder=${parentId}: ${error.substring(0, 100)}\n`);
+      if (cached) return cached.items;
+      return [];
     }
-    if (cached) return cached.items;
-    return [];
-  } finally {
-    pacer.release();
+    try {
+      const parsed = JSON.parse(stdout);
+      if (parsed && parsed.code && parsed.code !== 0) {
+        if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit();
+          if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+          const delay = retryDelay(attempt);
+          process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
+          await sleep(delay);
+          continue;
+        }
+        process.stderr.write(`[listFolderAsync] API error folder=${parentId} code=${parsed.code}\n`);
+        if (cached) return cached.items;
+        return [];
+      }
+      const items = (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
+      if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
+      writeCache(cacheFile, { items, fetched_at: Date.now() });
+      return items;
+    } catch (e) {
+      if (attempt < MAX_RETRIES) {
+        if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+        const delay = retryDelay(attempt);
+        await sleep(delay);
+        continue;
+      }
+      if (cached) return cached.items;
+      return [];
+    }
   }
+
+  if (cached) return cached.items;
+  return [];
 }
 
 async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, pacer) {
@@ -521,11 +933,12 @@ async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, t
     .filter(i => i.type === 'folder')
     .map(i => scanFolderWithStatsAsync(driveId, i.id, startDate, endDate, teamName, pacer));
   const subResults = await Promise.all(subFolderPromises);
-  const matchedFiles = items
-    .filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name) && dateInRange(i.name, startDate, endDate))
+  const docFiles = items.filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name));
+  const matchedFiles = docFiles
+    .filter(i => dateInRange(i.name, startDate, endDate))
     .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, drive_id: driveId, mtime: i.mtime }));
   const files = matchedFiles.concat(subResults.flatMap(r => r.files));
-  const totalScanned = matchedFiles.length + subResults.reduce((s, r) => s + r.totalScanned, 0);
+  const totalScanned = docFiles.length + subResults.reduce((s, r) => s + r.totalScanned, 0);
   return { files, totalScanned };
 }
 
@@ -554,13 +967,489 @@ async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, 
       const d = extractDateFromFileName(i.name);
       return d && (d.month * 100 + d.day) >= startNum;
     })
-    .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, mtime: i.mtime }));
+    .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, drive_id: driveId, mtime: i.mtime }));
   return files.concat(subResults.flat());
+}
+
+function dateToUnixSeconds(year, month, day) {
+  return Math.floor(new Date(year, month - 1, day).getTime() / 1000);
+}
+
+async function searchFilesAsync(opts, teamName, pacer) {
+  if (getKdocsConfig().useSearch === false) {
+    throw new Error('searchFilesAsync disabled by config.kdocs.useSearch=false');
+  }
+
+  const keyObj = {
+    drive_ids: opts.drive_ids,
+    parent_ids: opts.parent_ids || [],
+    keyword: opts.keyword || '',
+    file_exts: opts.file_exts || [],
+    file_type: opts.file_type || 'file',
+    time_type: opts.time_type || '',
+    start_time: opts.start_time || 0,
+    end_time: opts.end_time || 0,
+    type: opts.type || 'all',
+    scope: opts.scope || []
+  };
+  const cacheKey = crypto.createHash('sha1').update(JSON.stringify(keyObj)).digest('hex');
+  const cacheFile = path.join(teamFoldersCacheDir(teamName), `search_${cacheKey}.json`);
+  const cached = readCache(cacheFile);
+  if (cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) {
+    return cached.items;
+  }
+
+  const allItems = [];
+  let pageToken = null;
+
+    for (let page = 0; page < 20; page++) {
+      const inputObj = {
+        drive_ids: opts.drive_ids,
+        type: opts.type || 'all',
+        file_type: opts.file_type || 'file',
+        page_size: opts.page_size || 500,
+        order_by: opts.order_by || 'mtime',
+        order: opts.order || 'desc',
+        with_link: opts.with_link !== undefined ? opts.with_link : true
+      };
+      if (opts.keyword) inputObj.keyword = opts.keyword;
+      if (opts.parent_ids && opts.parent_ids.length > 0) inputObj.parent_ids = opts.parent_ids;
+      if (opts.file_exts && opts.file_exts.length > 0) inputObj.file_exts = opts.file_exts;
+      if (opts.time_type) inputObj.time_type = opts.time_type;
+      if (opts.start_time) inputObj.start_time = opts.start_time;
+      if (opts.end_time) inputObj.end_time = opts.end_time;
+      if (opts.scope && opts.scope.length > 0) inputObj.scope = opts.scope;
+      if (pageToken) inputObj.page_token = pageToken;
+
+      let success = false;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const { error, stdout } = await pacedKdocsCli(
+          pacer,
+          ['drive', 'search-files', '--output', 'json'], JSON.stringify(inputObj), 30000, 'search'
+        );
+        if (error && !stdout) {
+          if (cached) {
+            process.stderr.write(`[searchFilesAsync] 请求失败，使用过期缓存\n`);
+            return cached.items;
+          }
+          if (attempt < MAX_RETRIES) {
+            const delay = retryDelay(attempt);
+            await sleep(delay);
+            continue;
+          }
+          throw new Error(`search-files failed for drive=${opts.drive_ids.join(',')}: ${(error || '').substring(0, 100)}`);
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(stdout);
+        } catch (e) {
+          if (attempt < MAX_RETRIES) {
+            const delay = retryDelay(attempt);
+            await sleep(delay);
+            continue;
+          }
+          throw new Error(`search-files JSON parse failed: ${e.message.substring(0, 100)}`);
+        }
+        if (parsed && parsed.code && parsed.code !== 0) {
+          if (RETRY_CODES.has(parsed.code)) {
+            if (cached) {
+              process.stderr.write(`[searchFilesAsync] 限流 code=${parsed.code}，使用过期缓存\n`);
+              return cached.items;
+            }
+            if (attempt < MAX_RETRIES) {
+              const delay = retryDelay(attempt);
+              await sleep(delay);
+              continue;
+            }
+          }
+          const msg = parsed.message || parsed.msg || parsed.error || '';
+          const detail = parsed.detail || parsed.data?.message || parsed.data?.msg || '';
+          const suffix = [msg, detail].filter(Boolean).join(' ');
+          throw new Error(`search-files API error code=${parsed.code}${suffix ? `: ${suffix.substring(0, 200)}` : ''}`);
+        }
+        const data = (parsed && parsed.data && parsed.data.data) || {};
+        const items = data.items || [];
+        for (const item of items) {
+          const file = item.file || item;
+          allItems.push({
+            name: file.name,
+            id: file.id,
+            link: file.link_url || '',
+            size: file.size,
+            drive_id: file.drive_id || (opts.drive_ids.length === 1 ? opts.drive_ids[0] : ''),
+            mtime: file.mtime,
+            parent_id: file.parent_id || ''
+          });
+        }
+        pageToken = data.next_page_token || data.page_token || null;
+        success = true;
+        break;
+      }
+      if (!success || !pageToken) break;
+    }
+
+  writeCache(cacheFile, { items: allItems, fetched_at: Date.now() });
+  return allItems;
+}
+
+async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
+  if (getKdocsConfig().useSearch === false) {
+    throw new Error('searchFilesAsync disabled by config.kdocs.useSearch=false');
+  }
+
+  const keyObj = {
+    drive_ids: opts.drive_ids,
+    parent_ids: opts.parent_ids || [],
+    keyword: opts.keyword || '',
+    file_exts: opts.file_exts || [],
+    file_type: opts.file_type || 'file',
+    time_type: opts.time_type || '',
+    start_time: opts.start_time || 0,
+    end_time: opts.end_time || 0,
+    type: opts.type || 'all',
+    scope: opts.scope || []
+  };
+  const cacheKey = crypto.createHash('sha1').update(JSON.stringify(keyObj)).digest('hex');
+  const cacheFile = path.join(teamFoldersCacheDir(teamName), `search_${cacheKey}.json`);
+  const cached = readCache(cacheFile);
+  if (cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) return cached.items;
+
+  const allItems = [];
+  let pageToken = null;
+
+  for (let page = 0; page < 20; page++) {
+    const inputObj = {
+      drive_ids: opts.drive_ids,
+      type: opts.type || 'all',
+      file_type: opts.file_type || 'file',
+      page_size: opts.page_size || 500,
+      order_by: opts.order_by || 'mtime',
+      order: opts.order || 'desc',
+      with_link: opts.with_link !== undefined ? opts.with_link : true
+    };
+    if (opts.keyword) inputObj.keyword = opts.keyword;
+    if (opts.parent_ids && opts.parent_ids.length > 0) inputObj.parent_ids = opts.parent_ids;
+    if (opts.file_exts && opts.file_exts.length > 0) inputObj.file_exts = opts.file_exts;
+    if (opts.time_type) inputObj.time_type = opts.time_type;
+    if (opts.start_time) inputObj.start_time = opts.start_time;
+    if (opts.end_time) inputObj.end_time = opts.end_time;
+    if (opts.scope && opts.scope.length > 0) inputObj.scope = opts.scope;
+    if (pageToken) inputObj.page_token = pageToken;
+
+    let pageLoaded = false;
+    let lastCode = null;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const { error, stdout } = await pacedKdocsCli(
+        pacer,
+        ['drive', 'search-files', '--output', 'json'],
+        JSON.stringify(inputObj),
+        30000,
+        'search'
+      );
+
+        if (error && !stdout) {
+          if (attempt < MAX_RETRIES) {
+            if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+            await sleep(retryDelay(attempt));
+            continue;
+          }
+          if (cached) {
+            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+            process.stderr.write(`[searchFilesAsync] request failed after retries, using stale cache\n`);
+            return cached.items;
+          }
+        throw new Error(`search-files failed for drive=${opts.drive_ids.join(',')}: ${(error || '').substring(0, 100)}`);
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(stdout);
+      } catch (e) {
+        if (attempt < MAX_RETRIES) {
+          if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+          await sleep(retryDelay(attempt));
+          continue;
+        }
+        throw new Error(`search-files JSON parse failed: ${e.message.substring(0, 100)}`);
+      }
+
+      if (parsed && parsed.code && parsed.code !== 0) {
+        lastCode = parsed.code;
+        if (RETRY_CODES.has(parsed.code)) {
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit();
+          if (attempt < MAX_RETRIES) {
+            if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+            await sleep(retryDelay(attempt));
+            continue;
+          }
+          if (cached) {
+            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+            process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code} after retries, using stale cache\n`);
+            return cached.items;
+          }
+        }
+        const msg = parsed.message || parsed.msg || parsed.error || '';
+        const detail = parsed.detail || parsed.data?.message || parsed.data?.msg || '';
+        const suffix = [msg, detail].filter(Boolean).join(' ');
+        throw new Error(`search-files API error code=${parsed.code}${suffix ? `: ${suffix.substring(0, 200)}` : ''}`);
+      }
+
+      const data = (parsed && parsed.data && parsed.data.data) || {};
+      const items = data.items || [];
+      for (const item of items) {
+        const file = item.file || item;
+        allItems.push({
+          name: file.name,
+          id: file.id,
+          link: file.link_url || '',
+          size: file.size,
+          drive_id: file.drive_id || (opts.drive_ids.length === 1 ? opts.drive_ids[0] : ''),
+          mtime: file.mtime,
+          parent_id: file.parent_id || ''
+        });
+      }
+      pageToken = data.next_page_token || data.page_token || null;
+      pageLoaded = true;
+      if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
+      break;
+    }
+
+    if (!pageLoaded) {
+      if (cached) {
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+        process.stderr.write(`[searchFilesAsync] page failed${lastCode ? ` code=${lastCode}` : ''}, using stale cache\n`);
+        return cached.items;
+      }
+      break;
+    }
+    if (!pageToken) break;
+  }
+
+  writeCache(cacheFile, { items: allItems, fetched_at: Date.now() });
+  return allItems;
 }
 
 // ========== workspaceDir ==========
 function resolveWorkspaceDir() {
-  return process.env.WORKSPACE_DIR || path.resolve(__dirname, '../../..');
+  return path.resolve(__dirname, '..');
+}
+
+function ensureOutputDir() {
+  const dir = path.join(resolveWorkspaceDir(), 'outputs');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function outputPath(fileName) {
+  return path.join(ensureOutputDir(), fileName);
+}
+
+function legacyPath(fileName) {
+  return path.join(resolveWorkspaceDir(), fileName);
+}
+
+function findInputFile(fileName) {
+  const modern = path.join(resolveWorkspaceDir(), 'outputs', fileName);
+  if (fs.existsSync(modern)) return modern;
+  const legacy = legacyPath(fileName);
+  return fs.existsSync(legacy) ? legacy : modern;
+}
+
+function readInputJson(fileName) {
+  return JSON.parse(fs.readFileSync(findInputFile(fileName), 'utf-8'));
+}
+
+function writeOutputJson(fileName, data) {
+  const file = outputPath(fileName);
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+  return file;
+}
+
+function compactDateLabel(date) {
+  return String(date || '').replace(/[^\d]/g, '');
+}
+
+function getBaselineFileName(startDate, endDate) {
+  return `meeting-baseline-${compactDateLabel(startDate)}-${compactDateLabel(endDate)}.json`;
+}
+
+function getDocumentListFromTeamEntry(entry) {
+  if (!entry) return [];
+  if (entry.data && Array.isArray(entry.data.documents)) return entry.data.documents;
+  if (Array.isArray(entry.documents)) return entry.documents;
+  return [];
+}
+
+function createMeetingBaseline(teamEntries, options = {}) {
+  const teams = (teamEntries || []).map(entry => {
+    const team = entry.team || entry.teamName || (entry.data && entry.data.team) || '';
+    const documents = getDocumentListFromTeamEntry(entry);
+    const successfulReadCount = documents.filter(doc =>
+      (doc.rawContent && String(doc.rawContent).trim()) ||
+      (Array.isArray(doc.conclusions) && doc.conclusions.length > 0) ||
+      (Array.isArray(doc.todos) && doc.todos.length > 0)
+    ).length;
+    const analyzedDocumentCount = documents.length;
+    const meetingListCount = Number(entry.totalScanned || entry.meetingListCount || analyzedDocumentCount);
+    return {
+      team,
+      meetingListCount,
+      successfulReadCount,
+      analyzedDocumentCount,
+      documentNames: documents.map(doc => doc.name || doc.title || '').filter(Boolean)
+    };
+  });
+
+  const counts = teams.reduce((acc, team) => {
+    acc.meetingListCount += team.meetingListCount;
+    acc.successfulReadCount += team.successfulReadCount;
+    acc.analyzedDocumentCount += team.analyzedDocumentCount;
+    return acc;
+  }, { meetingListCount: 0, successfulReadCount: 0, analyzedDocumentCount: 0 });
+
+  if (Number.isFinite(Number(options.meetingListCount))) {
+    counts.meetingListCount = Number(options.meetingListCount);
+  }
+
+  return {
+    version: 1,
+    source: options.source || 'batch-read-documents',
+    startDate: options.startDate || '',
+    endDate: options.endDate || '',
+    generatedAt: new Date().toISOString(),
+    counts,
+    teams
+  };
+}
+
+function writeMeetingBaseline(teamEntries, options = {}) {
+  const baseline = createMeetingBaseline(teamEntries, options);
+  const file = writeOutputJson(getBaselineFileName(options.startDate, options.endDate), baseline);
+  return { baseline, file };
+}
+
+function readMeetingBaseline(startDate, endDate) {
+  const fileName = getBaselineFileName(startDate, endDate);
+  const file = findInputFile(fileName);
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, 'utf-8'));
+}
+
+function getRiskImpactScope(risk) {
+  const team = String((risk && risk.team) || '').trim();
+  const label = String((risk && risk.label) || '').trim();
+  if (team && label && label !== team) return `${team}-${label}`;
+  return team || label || '未明确';
+}
+
+function classifyMeetingType(title) {
+  const text = String(title || '');
+  const rules = [
+    ['技术专项会', /技术|性能|引擎|编辑器|GPU|客户端|服务端|专项|专题/],
+    ['合规/培训会', /法务|合规|版权|培训|宣讲|风控|维权/],
+    ['质量测试会', /质量|测试|Bug|缺陷|验收|提测|回归/],
+    ['运营发行会', /运营|发行|渠道|买量|商业化|用户|活动|周年庆|营销/],
+    ['产品策划会', /策划|规划|方案|需求|版本|玩法|体验/],
+    ['项目周会', /周会|周例会|周报/],
+    ['晨会/站会', /晨会|站会|daily|日报/i],
+    ['沟通同步会', /沟通|同步|对齐|交流|讨论|碰头/],
+    ['复盘会', /复盘|总结|回顾/],
+    ['评审会', /评审|评估|审查/],
+    ['组织管理会', /人力|组织|OKR|OGR|绩效|招聘|外包|行政/]
+  ];
+  for (const [label, pattern] of rules) {
+    if (pattern.test(text)) return label;
+  }
+  return '其他';
+}
+
+function summarizePrimaryMeetingTypes(documents, limit = 2) {
+  const counts = new Map();
+  for (const doc of documents || []) {
+    const type = classifyMeetingType(doc.name || doc.title || doc.text || '');
+    counts.set(type, (counts.get(type) || 0) + 1);
+  }
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return sorted.slice(0, limit).map(([type, count]) => `${type}(${count})`).join('、') || '无';
+}
+
+function cleanParticipantLine(line) {
+  return String(line || '')
+    .replace(/^[\s\-*•]+/, '')
+    .replace(/\s{2,}$/g, '')
+    .trim();
+}
+
+function normalizePersonChars(text) {
+  return String(text || '').replace(/⼈/g, '人');
+}
+
+function extractParticipants(markdown) {
+  const text = normalizePersonChars(markdown).replace(/\r\n/g, '\n');
+  const participantLabel = '(?:参会人员|参会人|参会|参与人员|参与人|与会人员|与会人|参加人员|参加人|出席人员|出席者|出席人|出席)';
+  const inlinePatterns = [
+    new RegExp(`${participantLabel}[：:]\\s*([^\\n|]+)`),
+    new RegExp(`\\|\\s*${participantLabel}\\s*\\|\\s*([^|\\n]+)\\s*\\|`)
+  ];
+
+  for (const pattern of inlinePatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const value = cleanParticipantLine(match[1]);
+      if (value) return value;
+    }
+  }
+
+  const lines = text.split('\n');
+  const labelRe = new RegExp(participantLabel);
+  const sectionHeadingRe = /^\s{0,3}#{1,6}\s*/;
+  const bracketedLabelRe = new RegExp(`^\\s{0,3}#{0,6}\\s*(?:[【\\[])?${participantLabel}(?:[】\\]])?[：:]?\\s*$`);
+
+  function isCandidate(line) {
+    const value = cleanParticipantLine(line)
+      .replace(/^@+/, '')
+      .replace(/^\|+|\|+$/g, '')
+      .trim();
+    if (!value) return false;
+    if (sectionHeadingRe.test(value)) return false;
+    if (labelRe.test(value)) return false;
+    if (/^(会议记录|会议纪要|会议时间|时间|要点速览|精选纪要|正文)[：:]?$/.test(value)) return false;
+    if (/^\d{4}[.\-/年]\s*\d{1,2}[.\-/月]\s*\d{1,2}/.test(value)) return false;
+    if (/^https?:\/\//i.test(value)) return false;
+    return value.length <= 500;
+  }
+
+  function candidateValue(line) {
+    return cleanParticipantLine(line)
+      .replace(/^\|+|\|+$/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!labelRe.test(line)) continue;
+
+    const afterLabel = line
+      .replace(new RegExp(`^\\s{0,3}#{0,6}\\s*(?:[【\\[])?${participantLabel}(?:[】\\]])?\\s*[：:]?\\s*`), '');
+    if (isCandidate(afterLabel)) return candidateValue(afterLabel);
+
+    for (let j = i + 1; j < Math.min(lines.length, i + 8); j++) {
+      const current = lines[j];
+      if (sectionHeadingRe.test(current) && !bracketedLabelRe.test(current)) break;
+      if (/会议时间|时间|会议记录|会议纪要|正文/.test(current) && !isCandidate(current)) break;
+      if (isCandidate(current)) return candidateValue(current);
+    }
+
+    for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
+      const current = lines[j];
+      if (sectionHeadingRe.test(current)) break;
+      if (isCandidate(current)) return candidateValue(current);
+    }
+  }
+
+  return '';
 }
 
 // ========== 从 Markdown 提取会议信息 ==========
@@ -570,8 +1459,7 @@ function extractInfo(markdown, fileName, importantPeople) {
   let participants = '';
   let meetingTime = '';
 
-  const pMatch = markdown.match(/参会[人⼈][：:]\s*([^\n]+)/);
-  if (pMatch) participants = pMatch[1].trim();
+  participants = extractParticipants(markdown);
 
   const tMatch = markdown.match(/会议时间[：:]\s*([^\n]+)/);
   if (tMatch) meetingTime = tMatch[1].trim();
@@ -638,6 +1526,60 @@ function groupByLabel(documents, teamName) {
   return groups;
 }
 
+function stripDocExt(name) {
+  return String(name || '').replace(/\.(otl|docx)$/i, '');
+}
+
+function formatSourceRef(teamName, docOrName, options = {}) {
+  const doc = typeof docOrName === 'string' ? { name: docOrName } : (docOrName || {});
+  const docName = stripDocExt(doc.name || doc.title || options.docName || '');
+  const baseTeam = options.teamName || teamName || '';
+  const label = options.label || doc.sourceLabel || '';
+  const parts = [baseTeam];
+  if (label && label !== baseTeam) parts.push(label);
+  if (docName) parts.push(docName);
+  return parts.filter(Boolean).join('-');
+}
+
+function withSourceRef(text, source) {
+  const t = String(text || '').trim();
+  if (!t) return '';
+  if (/（来源[:：]/.test(t)) return t;
+  return source ? `${t}（来源：${source}）` : t;
+}
+
+function stripInlineSourceRefs(text) {
+  return String(text || '')
+    .replace(/（来源[:：][^）]*）/g, '')
+    .replace(/\(来源[:：][^)]*\)/g, '')
+    .replace(/；\s*来源[:：][^；。]*([。；]?)/g, '$1')
+    .replace(/，\s*来源[:：][^，。]*([。，]?)/g, '$1')
+    .replace(/\s*-\s*会议记录）/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExp(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeMultiSourceBulletPrefixes(markdown, teamNames = []) {
+  let result = String(markdown || '');
+  for (const teamName of teamNames || []) {
+    if (!teamName) continue;
+    const teamRe = escapeRegExp(teamName);
+    const re = new RegExp(
+      `(^\\s*(?:[•\\-*]|\\d+[.、])\\s*)【${teamRe}】([^\\n]*(?:（来源：|\\(来源:|\\(来源：)${teamRe}-([^\\s\\-（）()]+)-)`,
+      'gm'
+    );
+    result = result.replace(re, (match, bulletPrefix, rest, label) => {
+      if (!label || label === teamName) return match;
+      return `${bulletPrefix}【${teamName}-${label}】${rest}`;
+    });
+  }
+  return result;
+}
+
 // ========== 拆分拼接项 ==========
 function splitConcatenated(items) {
   const result = [];
@@ -658,14 +1600,18 @@ const riskKeywords = {
 function analyzeDocs(documents, teamName, options = {}) {
   let totalConclusions = 0, totalTodos = 0, importantCount = 0;
   let allConclusions = [], allTodos = [];
+  let allConclusionItems = [], allTodoItems = [];
 
   documents.forEach(d => {
     const splitConclusions = splitConcatenated(d.conclusions || []);
     const splitTodos = splitConcatenated(d.todos || []);
+    const source = formatSourceRef(teamName, d, options);
     totalConclusions += splitConclusions.length;
     totalTodos += splitTodos.length;
     allConclusions.push(...splitConclusions);
     allTodos.push(...splitTodos);
+    allConclusionItems.push(...splitConclusions.map(text => ({ text, source, sourceLabel: d.sourceLabel || '', docName: stripDocExt(d.name || '') })));
+    allTodoItems.push(...splitTodos.map(text => ({ text, source, sourceLabel: d.sourceLabel || '', docName: stripDocExt(d.name || '') })));
     if (d.important) importantCount++;
   });
 
@@ -680,6 +1626,12 @@ function analyzeDocs(documents, teamName, options = {}) {
         const topic = topicMatch[1].trim();
         if (topic.length > 5 && !allConclusions.includes(topic)) {
           allConclusions.push(topic);
+          allConclusionItems.push({
+            text: topic,
+            source: formatSourceRef(teamName, d, options),
+            sourceLabel: d.sourceLabel || '',
+            docName: stripDocExt(d.name || '')
+          });
         }
       }
     }
@@ -687,18 +1639,20 @@ function analyzeDocs(documents, teamName, options = {}) {
 
   // 风险分析：从 conclusions+todos + 全文扫描
   let riskMap = new Map();
-  function addRisk(cleaned, level, matchedKw) {
+  function addRisk(cleaned, level, matchedKw, source) {
     const existing = riskMap.get(cleaned);
     if (existing) {
       if (level === 'high' && existing.level === 'mid') {
-        riskMap.set(cleaned, { keyword: matchedKw, text: cleaned, level: 'high' });
+        riskMap.set(cleaned, { keyword: matchedKw, text: cleaned, level: 'high', source: source || existing.source || '' });
+      } else if (!existing.source && source) {
+        existing.source = source;
       }
     } else {
-      riskMap.set(cleaned, { keyword: matchedKw, text: cleaned, level });
+      riskMap.set(cleaned, { keyword: matchedKw, text: cleaned, level, source: source || '' });
     }
   }
 
-  function matchRisk(text) {
+  function matchRisk(text, source = '') {
     const cleaned = cleanText(text);
     if (!cleaned || cleaned.length < 10) return;
     if (/^(本次会议|重点讨论|会议围绕|本期会议|探讨|汇报|总结)/.test(cleaned)) return;
@@ -719,11 +1673,11 @@ function analyzeDocs(documents, teamName, options = {}) {
     }
     if (level) {
       const truncated = cleaned.length > 120 ? cleaned.substring(0, 117) + '...' : cleaned;
-      addRisk(truncated, level, matchedKw);
+      addRisk(truncated, level, matchedKw, source);
     }
   }
 
-  [...allConclusions, ...allTodos].forEach(matchRisk);
+  [...allConclusionItems, ...allTodoItems].forEach(item => matchRisk(item.text, item.source));
 
   // 从全文中提取结论/待决/待办段落，补充风险匹配
   documents.forEach(d => {
@@ -736,7 +1690,7 @@ function analyzeDocs(documents, teamName, options = {}) {
       const fragments = section.split(/[\n\v]/).flatMap(l => l.split(/(?=•\s)/));
       for (const frag of fragments) {
         if (frag.trim().length < 12) continue;
-        matchRisk(frag);
+        matchRisk(frag, formatSourceRef(teamName, d, options));
       }
     }
   });
@@ -745,12 +1699,12 @@ function analyzeDocs(documents, teamName, options = {}) {
   for (const [, r] of riskMap) {
     if (r.level === 'high') {
       const isDup = highRisks.some(e => textSimilar(e.text, r.text) > 0.6);
-      if (!isDup) highRisks.push({ keyword: r.keyword, text: r.text });
+      if (!isDup) highRisks.push({ keyword: r.keyword, text: r.text, source: r.source || '' });
     } else {
       const isDupHigh = highRisks.some(e => textSimilar(e.text, r.text) > 0.6);
       if (isDupHigh) continue;
       const isDupMid = midRisks.some(e => textSimilar(e.text, r.text) > 0.6);
-      if (!isDupMid) midRisks.push({ keyword: r.keyword, text: r.text });
+      if (!isDupMid) midRisks.push({ keyword: r.keyword, text: r.text, source: r.source || '' });
     }
   }
 
@@ -758,7 +1712,7 @@ function analyzeDocs(documents, teamName, options = {}) {
   const timeNodePattern = /(\d{4}[年\-]\d{1,2}[月\-]\d{1,2}[日号]?|\d{1,2}[.月]\s*\d{1,2}[日号]?|\d{1,2}月(?:\d{1,2}[日号])?|年底|年中|季度末|季度|上半年|下半年)/;
   let timeNodes = [];
 
-  function extractTimeNode(text, docName) {
+  function extractTimeNode(text, docInfo) {
     if (!timeNodePattern.test(text)) return;
     if (/\d+\.\d+\s*版/.test(text) && !/月/.test(text) && !/\d{4}[年\-]/.test(text)) return;
     let stripped = text.trim();
@@ -796,7 +1750,7 @@ function analyzeDocs(documents, teamName, options = {}) {
         }
       }
     }
-    const source = docName ? docName.replace(/\.(otl|docx)$/i, '') : '';
+    const source = docInfo ? formatSourceRef(teamName, docInfo, options) : '';
     if (dateStr) {
       const truncated = cleaned.length > 100 ? cleaned.substring(0, 97) + '...' : cleaned;
       timeNodes.push({ text: truncated, owner: owner || teamName || '', dateStr, source });
@@ -806,7 +1760,7 @@ function analyzeDocs(documents, teamName, options = {}) {
   // 从 todos 提取
   documents.forEach(d => {
     const splitTodos = splitConcatenated(d.todos || []);
-    splitTodos.forEach(t => extractTimeNode(t, d.name));
+    splitTodos.forEach(t => extractTimeNode(t, d));
   });
 
   // 从全文结论/待办/讨论要点段落中补充提取时间节点
@@ -820,7 +1774,7 @@ function analyzeDocs(documents, teamName, options = {}) {
       const fragments = section.split(/[\n\v]/).flatMap(l => l.split(/(?=•\s)/));
       for (const frag of fragments) {
         if (frag.trim().length < 10) continue;
-        extractTimeNode(frag, d.name);
+        extractTimeNode(frag, d);
       }
     }
   });
@@ -875,6 +1829,12 @@ function analyzeDocs(documents, teamName, options = {}) {
 
   allConclusions = allConclusions.map(c => cleanText(c)).filter(isValidConclusion);
   allTodos = allTodos.map(t => cleanText(t)).filter(isValidConclusion);
+  allConclusionItems = allConclusionItems
+    .map(item => ({ ...item, text: cleanText(item.text) }))
+    .filter(item => isValidConclusion(item.text));
+  allTodoItems = allTodoItems
+    .map(item => ({ ...item, text: cleanText(item.text) }))
+    .filter(item => isValidConclusion(item.text));
 
   // 从全文提取议题分类，生成趋势描述
   const topicCategories = {};
@@ -958,7 +1918,7 @@ function analyzeDocs(documents, teamName, options = {}) {
   return {
     totalConclusions, totalTodos, importantCount,
     highRisks, midRisks, timeNodes, nearTermNodes, midTermNodes,
-    allConclusions, allTodos,
+    allConclusions, allTodos, allConclusionItems, allTodoItems,
     trends, actionSuggestions, topicCategories: sortedCategories
   };
 }
@@ -1020,8 +1980,8 @@ function generateStrategicAnalysis(teamDataList) {
   for (const theme of themes) {
     const teamStats = [];
     for (const td of teamDataList) {
-      const allText = [...td.analysis.allConclusions, ...td.analysis.allTodos];
-      const matches = allText.filter(t => theme.pattern.test(t));
+      const allItems = [...(td.analysis.allConclusionItems || []), ...(td.analysis.allTodoItems || [])];
+      const matches = allItems.filter(item => theme.pattern.test(item.text));
       if (matches.length === 0) continue;
       const docCount = td.data.documents.length;
       const meetingHits = td.data.documents.filter(d => {
@@ -1029,7 +1989,7 @@ function generateStrategicAnalysis(teamDataList) {
         return theme.pattern.test(text);
       }).length;
       const pct = Math.round((meetingHits / docCount) * 100);
-      const examples = dedupTexts(matches).slice(0, 4).map(m => m.substring(0, 50));
+      const examples = matches.slice(0, 4).map(item => withSourceRef(item.text.substring(0, 50), item.source));
       let level;
       if (pct >= 40 || matches.length >= 10) level = 'high';
       else if (pct >= 15 || matches.length >= 4) level = 'mid';
@@ -1052,7 +2012,7 @@ function generateStrategicAnalysis(teamDataList) {
     teamDataList.forEach(td => {
       const nodes = [...td.analysis.nearTermNodes, ...td.analysis.midTermNodes];
       if (nodes.length > 0) {
-        nodesByTeam[td.teamName] = nodes.slice(0, 5).map(n => `${n.dateStr} ${n.text.substring(0, 30)}`);
+        nodesByTeam[td.teamName] = nodes.slice(0, 5).map(n => `${n.dateStr} ${withSourceRef(n.text.substring(0, 30), n.source)}`);
       }
     });
     const existing = results.find(r => r.name.includes('产品节点'));
@@ -1113,36 +2073,66 @@ function scanFolderFromDate(driveId, folderId, startMonth, startDay, teamName) {
 }
 
 // ========== 标题标准化 ==========
-function normalizeTitle(raw) {
+function normalizeTitle(raw, explicitDate = null) {
   const yearStr = String(currentYear());
   let t = raw.trim();
   let dateStr = '';
 
-  const yearRe = new RegExp(yearStr + '[.\\-]?(\\d{2})[.\\-]?(\\d{2})');
-  let m = t.match(yearRe);
-  if (m) {
-    dateStr = `${yearStr}${m[1]}${m[2]}`;
-    t = t.replace(m[0], '');
-  } else {
-    m = t.match(/^(\d{2})(\d{2})\s*[\-—–]/);
-    if (m) {
-      dateStr = `${yearStr}${m[1]}${m[2]}`;
-      t = t.replace(m[0], '');
-    }
+  t = t.replace(/\.otl$/i, '').replace(/\.docx$/i, '');
+  t = t.replace(/^《|》$/g, '');
+
+  const extractedDate = explicitDate || extractDateFromFileName(t);
+  if (extractedDate) {
+    dateStr = `${yearStr}${String(extractedDate.month).padStart(2, '0')}${String(extractedDate.day).padStart(2, '0')}`;
   }
 
-  t = t.replace(/\.otl$/i, '');
-  t = t.replace(/\.docx$/i, '');
-  t = t.replace(/^[\s\-—–_·．|｜]+/, '');
-  t = t.replace(/[\s\-—–_·．|｜]+$/, '');
+  // 1. YYYYMMDD（可能紧跟 HHMMSS 时间戳）
+  const yearRe = new RegExp(yearStr + '[.\\-]?(\\d{1,2})[.\\-]?(\\d{2})');
+  let m = t.match(yearRe);
+  if (m) {
+    t = t.replace(m[0], '');
+    t = t.replace(/^\s*\d{6}\s*/, '');
+  }
+
+  // 1.5 两位年份：260506、26.3.30
+  if (dateStr) {
+    const shortYear = yearStr.slice(-2);
+    const prevShortYear = String(currentYear() - 1).slice(-2);
+    const shortYearRe = new RegExp(`(^|\\D)(?:${shortYear}|${prevShortYear})[.\\-]?\\d{1,2}[.\\-]?\\d{2}(?=\\D|$)`);
+    t = t.replace(shortYearRe, '$1');
+  }
+
+  // 2. MMDD- 前缀
+  m = t.match(/^(\d{2})(\d{2})\s*[\-—–]/);
+  if (m) {
+    t = t.replace(m[0], '');
+  }
+
+  // 3. 中文日期：X月Y日 或 YYYY年X月Y日
+  m = t.match(/(?:\d{4}\s*年?\s*)?\d{1,2}\s*月\s*\d{1,2}\s*日?/);
+  if (m) {
+    t = t.replace(m[0], '');
+  }
+
+  // 4. 无年份 M.D / MM-DD 前缀
+  m = t.match(/^\s*(\d{1,2})[.\-](\d{1,2})(?=\D|$)\s*/);
+  if (m) {
+    t = t.replace(m[0], '');
+  }
+
+  t = t.replace(/（[^）]*\d+月\d+日[^）]*）?/g, '');
+  t = t.replace(/\([^)]*\d+月\d+日[^)]*\)?/g, '');
+  t = t.replace(/_/g, ' ');
+  t = t.replace(/[\-—–]{2,}/g, '-');
+  t = t.replace(/^[\s\-—–_·．|｜《》【】]+/, '');
+  t = t.replace(/[\s\-—–_·．|｜《》【】）]+$/, '');
   t = t.replace(/^【纪要】\s*/, '');
-  t = t.replace(/\s*[\-—–·]\s*会议记录\s*$/, '');
-  t = t.replace(/\s*会议记录\s*$/, '');
+  t = t.replace(/\s*[\-—–·]\s*周?会议记录\s*$/, '');
+  t = t.replace(/\s*周?会议记录\s*$/, '');
   t = t.replace(/\s*[\-—–·]\s*结构性会议记录\s*$/, '');
   t = t.replace(/\s*[\-—–·]\s*结构性纪要\s*$/, '');
   t = t.replace(/\s*[\-—–·]\s*结构性会议\s*$/, '');
   t = t.replace(/\s*[\-—–·]\s*结构性\s*$/, '');
-  t = t.replace(/_/g, ' ');
   t = t.replace(/^[\s\-—–_·．|｜]+/, '');
   t = t.replace(/[\s\-—–_·．|｜]+$/, '');
   t = t.replace(/\s{2,}/g, ' ');
@@ -1172,52 +2162,6 @@ function charSimilarity(a, b) {
   let overlap = 0;
   for (const c of setA) { if (setB.has(c)) overlap++; }
   return overlap / Math.max(setA.size, setB.size);
-}
-
-// ========== OpenClaw provider 自动检测 ==========
-function resolveOpenClawProvider() {
-  const homedir = require('os').homedir();
-  const ocConfigPath = path.join(homedir, '.openclaw', 'openclaw.json');
-  try {
-    if (!fs.existsSync(ocConfigPath)) {
-      console.log(`[OpenClaw] 配置文件不存在: ${ocConfigPath}`);
-      return null;
-    }
-    let rawConfig = fs.readFileSync(ocConfigPath, 'utf-8');
-    // Resolve ${ENV_VAR} placeholders in the config
-    rawConfig = rawConfig.replace(/\$\{([^}]+)\}/g, (_, varName) => {
-      const val = process.env[varName];
-      if (val) return val;
-      console.log(`[OpenClaw] 环境变量 ${varName} 未设置`);
-      return '';
-    });
-    const oc = JSON.parse(rawConfig);
-    const primary = oc.agents && oc.agents.defaults && oc.agents.defaults.model && oc.agents.defaults.model.primary;
-    if (!primary) {
-      console.log('[OpenClaw] 未找到 agents.defaults.model.primary');
-      return null;
-    }
-    const slashIdx = primary.lastIndexOf('/');
-    if (slashIdx === -1) {
-      console.log(`[OpenClaw] primary 格式不含 /: "${primary}"`);
-      return null;
-    }
-    const providerName = primary.substring(0, slashIdx);
-    const modelId = primary.substring(slashIdx + 1);
-    const provider = oc.models && oc.models.providers && oc.models.providers[providerName];
-    if (!provider) {
-      console.log(`[OpenClaw] 未找到 provider "${providerName}"，可用: ${Object.keys(oc.models && oc.models.providers || {}).join(', ')}`);
-      return null;
-    }
-    if (!provider.baseUrl || !provider.apiKey) {
-      console.log(`[OpenClaw] provider "${providerName}" 缺少 ${!provider.baseUrl ? 'baseUrl' : 'apiKey'}`);
-      return null;
-    }
-    return { baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: modelId };
-  } catch (e) {
-    console.log(`[OpenClaw] 解析失败: ${e.message}`);
-    return null;
-  }
 }
 
 // ========== HTTP 调用 OpenAI-compatible API ==========
@@ -1281,30 +2225,46 @@ function callLLMApi(baseUrl, apiKey, model, prompt, timeout, options = {}) {
   });
 }
 
-// ========== CLI 方式调用 LLM ==========
-function callLLMCli(cmd, args, prompt, timeout, maxRetries) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const result = execFileSync(cmd, args, {
-        input: prompt,
-        encoding: 'utf-8',
-        timeout,
-        maxBuffer: 1024 * 1024 * 10,
-        windowsHide: true
-      });
-      return result.trim();
-    } catch (e) {
-      const isTimeout = e.message.includes('ETIMEDOUT') || e.message.includes('timed out') || e.killed;
-      const errMsg = e.message.substring(0, 200);
-      if (attempt < maxRetries) {
-        console.log(`[callLLM] 第${attempt}次调用失败（${errMsg.substring(0,80)}），重试 ${attempt+1}/${maxRetries}...`);
-        continue;
-      }
-      console.log(`[callLLM] CLI 调用失败，回退到规则分析。`);
-      return null;
+// ========== 解析 config.json 中 ${ENV_VAR} 占位符 ==========
+function resolveConfigPlaceholders(obj) {
+  const result = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') {
+      result[k] = v.replace(/\$\{([^}]+)\}/g, (_, name) => process.env[name] || '');
+    } else {
+      result[k] = v;
     }
   }
-  return null;
+  return result;
+}
+
+// ========== 读取 OpenClaw 所有 provider ==========
+function resolveOpenClawProviders() {
+  const providers = [];
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME;
+    const cfgPath = path.join(home, '.openclaw', 'openclaw.json');
+    if (!fs.existsSync(cfgPath)) return providers;
+    const data = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    const provMap = data.models?.providers || {};
+    const preferredModels = ['mimo-v2-pro', 'glm-5.1', 'mco-4', 'deepseek-v3.2', 'kimi-k2.5'];
+    for (const [name, cfg] of Object.entries(provMap)) {
+      const resolvedCfg = resolveConfigPlaceholders(cfg);
+      if (!resolvedCfg.baseUrl || !resolvedCfg.apiKey) continue;
+      const models = resolvedCfg.models || [];
+      const picked = models.find(m => preferredModels.includes(m.id)) || models[0];
+      if (!picked) continue;
+      providers.push({
+        providerName: name,
+        baseUrl: resolvedCfg.baseUrl.replace(/\/+$/, ''),
+        apiKey: resolvedCfg.apiKey,
+        model: picked.id
+      });
+    }
+  } catch (e) {
+    process.stderr.write(`[resolveOpenClawProviders] ${e.message}\n`);
+  }
+  return providers;
 }
 
 // ========== 通用 LLM 调用（多后端自动选择） ==========
@@ -1316,42 +2276,118 @@ async function callLLM(prompt, config = {}) {
   if (timeout > baseTimeout) {
     console.log(`[callLLM] prompt ${promptKB}KB 较大，超时自动调整为 ${Math.round(timeout / 1000)}s`);
   }
-  const maxRetries = llmCfg.maxRetries || 3;
 
-  // 1. config.json 显式配了 API 地址
+  // 1. config.json 显式配了 API 地址（支持 ${ENV_VAR} 占位符）
   if (llmCfg.baseUrl && llmCfg.apiKey) {
-    const model = llmCfg.model || 'default';
-    console.log(`[callLLM] 使用配置的 API: ${llmCfg.baseUrl} (model: ${model})`);
-    const result = await callLLMApi(llmCfg.baseUrl, llmCfg.apiKey, model, prompt, timeout);
+    const resolved = resolveConfigPlaceholders(llmCfg);
+    const model = resolved.model || 'default';
+    console.log(`[callLLM] 使用配置的 API: ${resolved.baseUrl} (model: ${model})`);
+    const result = await callLLMApi(resolved.baseUrl, resolved.apiKey, model, prompt, timeout);
     if (result) return result;
     console.log('[callLLM] API 调用失败，尝试下一个后端...');
   }
 
-  // 2. config.json 配了自定义 CLI 命令（非默认 claude）
-  const cmd = llmCfg.command || 'claude';
-  const args = llmCfg.args || ['-p'];
-  if (cmd !== 'claude') {
-    console.log(`[callLLM] 使用自定义命令: ${cmd} ${args.join(' ')}`);
-    return callLLMCli(cmd, args, prompt, timeout, maxRetries);
-  }
-
-  // 3. 自动检测 OpenClaw 环境
-  const oc = resolveOpenClawProvider();
-  if (oc) {
-    console.log(`[callLLM] 检测到 OpenClaw 环境，使用 ${oc.model} (${oc.baseUrl})`);
+  // 2. 自动检测 OpenClaw 环境（遍历所有 provider 逐个回退）
+  const providers = resolveOpenClawProviders();
+  for (const oc of providers) {
+    console.log(`[callLLM] 尝试 OpenClaw provider: ${oc.providerName} / ${oc.model} (${oc.baseUrl})`);
     const result = await callLLMApi(oc.baseUrl, oc.apiKey, oc.model, prompt, timeout);
     if (result) return result;
-    console.log('[callLLM] OpenClaw API 调用失败，尝试 claude CLI...');
+    console.log(`[callLLM] ${oc.providerName} 调用失败，尝试下一个...`);
   }
 
-  // 4. 默认尝试 claude -p（仅 1 次快速失败）
-  console.log('[callLLM] 尝试 claude CLI...');
-  return callLLMCli(cmd, args, prompt, timeout, 1);
+  if (providers.length === 0 && !llmCfg.baseUrl) {
+    console.log('[callLLM] 无可用 LLM 后端（config.json 未配置 API，OpenClaw 未安装），回退到规则分析');
+  } else {
+    console.log('[callLLM] 所有 LLM 后端均失败，回退到规则分析');
+  }
+  return null;
 }
 
 // ========== 综合报告 prompt ==========
+function compactOneTeamSummaryForComprehensive(summary, options = {}) {
+  const maxChars = Math.max(600, Number(options.maxCharsPerTeam) || 2600);
+  const text = String(summary || '').replace(/\r\n/g, '\n');
+  if (text.length <= maxChars) return text.trim();
+
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const mustKeepPatterns = [
+    /^#{1,4}\s+/,
+    /风险|高风险|中风险|阻塞|延期|异常|缺口|问题|隐患|风险点/,
+    /节点|时间|日期|上线|交付|验收|评审|里程碑|05-|06-|07-|08-|\d{1,2}月\d{1,2}日/,
+    /建议|行动|跟进|待办|决策|结论|关键|核心|趋势|发现/,
+    /\|.*\|/,
+    /来源|source/i,
+  ];
+  const weakFillerPatterns = [
+    /普通过程描述/,
+    /背景说明/,
+    /详细讨论过程/,
+    /会议过程记录/,
+  ];
+
+  const selected = [];
+  const seen = new Set();
+  function addLine(line) {
+    const normalized = line.replace(/\s+/g, ' ').slice(0, 220);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    selected.push(normalized);
+  }
+
+  for (const line of lines) {
+    if (mustKeepPatterns.some(pattern => pattern.test(line))) addLine(line);
+  }
+
+  if (selected.length < 8) {
+    for (const line of lines) {
+      if (weakFillerPatterns.some(pattern => pattern.test(line))) continue;
+      addLine(line);
+      if (selected.length >= 16) break;
+    }
+  }
+
+  let compacted = selected.join('\n');
+  if (compacted.length > maxChars) {
+    const capped = [];
+    let total = 0;
+    for (const line of selected) {
+      const nextTotal = total + line.length + 1;
+      if (nextTotal > maxChars) break;
+      capped.push(line);
+      total = nextTotal;
+    }
+    compacted = capped.join('\n');
+  }
+
+  return compacted.trim() || text.slice(0, maxChars).trim();
+}
+
+function compactTeamSummariesForComprehensive(teamSummaries, options = {}) {
+  const result = {};
+  for (const [teamName, summary] of Object.entries(teamSummaries || {})) {
+    result[teamName] = compactOneTeamSummaryForComprehensive(summary, options);
+  }
+  return result;
+}
+
+function summarizeTeamSummaryCompression(rawSummaries, compactedSummaries) {
+  const rawChars = Object.values(rawSummaries || {}).reduce((sum, text) => sum + String(text || '').length, 0);
+  const compactChars = Object.values(compactedSummaries || {}).reduce((sum, text) => sum + String(text || '').length, 0);
+  const savedChars = Math.max(0, rawChars - compactChars);
+  const ratio = rawChars > 0 ? Math.round((compactChars / rawChars) * 100) : 100;
+  return { rawChars, compactChars, savedChars, ratio };
+}
+
 function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   const { startDate, endDate, grandTotalDocs, teamCount, teamSummaries, multiSourceTeamNames } = options;
+  const reportLimits = options.reportLimits || {};
+  const promptMinItems = Number(reportLimits.promptMinItems) || 5;
+  const promptMaxItems = Number(reportLimits.promptMaxItems) || 12;
+  const compactTeamSummaries = options.compactTeamSummaries !== false;
+  const activeTeamSummaries = teamSummaries && compactTeamSummaries
+    ? compactTeamSummariesForComprehensive(teamSummaries, { maxCharsPerTeam: options.maxTeamSummaryChars })
+    : teamSummaries;
   const msNames = multiSourceTeamNames || [];
   const parts = [];
 
@@ -1364,13 +2400,14 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('4. 禁止编造数字、百分比、时间节点。所有数字必须能在数据中找到原文。');
   parts.push('5. 每条分析必须能指出来源于哪场会议的哪条结论或待办。如果某个章节数据不足以支撑分析，直接写"数据不足，暂无法分析"，绝不凑内容。');
   parts.push('6. 风险分析只能基于数据中明确提到的问题原文，不允许自行推断潜在风险。');
+  parts.push('7. 报告面向对外阅读，正文段落和普通 bullet 不要在句尾输出"（来源：...）"；来源只保留在表格的"来源会议"列以及附录中。');
   parts.push('');
   parts.push(`基于以下 ${teamCount || teamDataList.length} 个团队共 ${grandTotalDocs || '若干'} 份会议记录的汇总数据（${startDate} ~ ${endDate}），`);
   parts.push('请为综合分析报告生成全部分析内容。');
   parts.push('');
 
   for (const td of teamDataList) {
-    const summary = teamSummaries && teamSummaries[td.teamName];
+    const summary = activeTeamSummaries && activeTeamSummaries[td.teamName];
     if (summary) {
       parts.push(`# ${td.teamName}（${td.data.documents.length}场会议，以下为该团队分析摘要）`);
       parts.push('');
@@ -1384,7 +2421,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
       parts.push('');
       parts.push('会议清单：');
       td.data.documents.forEach(d => {
-        const name = (d.name || '').replace(/\.(otl|docx)$/i, '');
+        const name = formatSourceRef(td.teamName, d);
         parts.push(`  - ${name}（结论${(d.conclusions||[]).length}条，待办${(d.todos||[]).length}条${d.important ? '，重要' : ''}）`);
       });
       parts.push('');
@@ -1393,15 +2430,15 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
         parts.push('');
       }
       parts.push('### 核心议题');
-      dedupTexts(a.allConclusions).forEach(c => parts.push(`• ${c}`));
+      (a.allConclusionItems || []).forEach(item => parts.push(`• ${withSourceRef(item.text, item.source)}`));
       parts.push('');
       parts.push('### 关键待办');
-      dedupTexts(a.allTodos).forEach(t => parts.push(`• ${t}`));
+      (a.allTodoItems || []).forEach(item => parts.push(`• ${withSourceRef(item.text, item.source)}`));
       parts.push('');
       if (a.highRisks.length > 0 || a.midRisks.length > 0) {
         parts.push(`### 风险事项（高${a.highRisks.length}项，中${a.midRisks.length}项）`);
-        a.highRisks.forEach(r => parts.push(`• [高][${r.keyword}] ${r.text}`));
-        a.midRisks.forEach(r => parts.push(`• [中][${r.keyword}] ${r.text}`));
+        a.highRisks.forEach(r => parts.push(`• [高][${r.keyword}] ${withSourceRef(r.text, r.source)}`));
+        a.midRisks.forEach(r => parts.push(`• [中][${r.keyword}] ${withSourceRef(r.text, r.source)}`));
         parts.push('');
       }
       if ((a.nearTermNodes && a.nearTermNodes.length > 0) || (a.midTermNodes && a.midTermNodes.length > 0)) {
@@ -1418,78 +2455,94 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
 
   parts.push('## 输出要求');
   parts.push('');
+  parts.push(`第四章的"核心议题"和"关键决议"每个团队输出 ${promptMinItems}-${promptMaxItems} 条；数据足够时优先接近上限，不要固定只写3条。`);
   parts.push('请按以下结构输出纯 markdown（不要代码块包裹），从"## 1.2 主要趋势"开始：');
   parts.push('');
   parts.push('## 1.2 主要趋势');
-  parts.push('列出3-8条跨团队的主要趋势和核心发现，每条格式：• 【团队名】趋势描述（来源：团队名-会议名称）');
-  parts.push('多source团队格式：• 【团队名·子项目】趋势描述（来源：团队名·子项目-会议名称）');
+  parts.push('按公司层级信息贯通进行总结，列出5-6条跨团队、跨项目的主要趋势；不要照抄用户参考条目，不要按单个团队流水账罗列。每条用自然段式bullet输出，先写公司层面的趋势判断，再串联支撑该趋势的部门/项目事实。');
+  if (msNames.length > 0) {
+    parts.push(`多source团队（${msNames.join('、')}）格式：• 【团队名-label】趋势描述。`);
+    parts.push('label 只能使用上方数据来源中已给出的 config sourceLabel，禁止从会议标题、括号分类或正文小标题中自行提取 label。');
+  }
   parts.push('');
   parts.push('# 二、风险点分析');
   parts.push('先写一句概述，然后：');
   parts.push('## 2.1 高风险事项');
   parts.push('仅从上面"风险事项"章节中标记为[高]的条目中提取，用原文改写，不得新增数据中不存在的风险。');
-  parts.push('每条格式：• 【高】团队名+风险描述（不超过120字）（来源：团队名-会议名称）。没有则写"本期未发现高风险事项。"');
+  parts.push('只保留对交付、质量、合规或用户体验影响最大的3-6条，合并同类项，避免把所有高风险原样堆叠。每条格式：• 【高】风险描述（不超过120字）。没有则写"本期未发现高风险事项。"');
   parts.push('## 2.2 中风险事项');
-  parts.push('仅从上面标记为[中]的条目中提取。每条格式：• 【中】团队名+风险描述（来源：团队名-会议名称）');
+  parts.push('仅从上面标记为[中]的条目中提取，保留5-8条代表性事项，合并同类项。每条格式：• 【中】风险描述。');
   parts.push('## 2.3 风险矩阵');
-  parts.push('输出markdown表格，4列：风险项、等级、影响范围、来源会议。仅包含2.1和2.2中已列出的风险，不得新增。例如：');
-  parts.push('| 风险项 | 等级 | 影响范围 | 来源会议 |');
-  parts.push('|--------|------|----------|----------|');
-  parts.push('| 剑侠世界4外网性能不达标 | 高 | 用户体验 | 剑侠世界系列·剑世4-20260402-质量汇报会 |');
+  parts.push('输出markdown表格，只保留3列：风险项、等级、影响范围。去掉量化影响和来源会议两列；影响范围必须填写所属部门或项目名称，不要写泛化影响描述。仅包含2.1和2.2中已列出的风险，不得新增。');
+  parts.push('| 风险项 | 等级 | 影响范围 |');
+  parts.push('|--------|------|----------|');
+  parts.push('| 剑侠世界4外网性能不达标 | 高 | 剑侠世界系列 |');
   parts.push('');
   parts.push('# 三、重点关注节点');
   parts.push('先写一句概述，然后：');
   parts.push('## 3.1 近期节点（本月内）');
   parts.push('仅从上面"时间节点"章节中提取，不得编造不存在的时间节点。');
-  parts.push('输出markdown表格，4列：时间节点、责任方、关键事项、来源会议。例如：');
-  parts.push('| 时间节点 | 责任方 | 关键事项 | 来源会议 |');
-  parts.push('|----------|--------|----------|----------|');
-  parts.push('| 04-10 | 马力 | 重置版案例联调验收 | 剑网3系列·剑网3-20260402-质量汇报会 |');
+  parts.push('输出markdown表格，5列：时间节点、责任方、关键事项、量化指标、来源会议；没有量化指标时写"待明确"。');
+  parts.push('⚠️ 责任方必须是数据中的团队名称（即上面各"# 团队名"标题），不得填写会议内容中提到的内部小组或个人名（如"引擎组""测试团队"等）。');
+  parts.push('⚠️ 来源会议格式规则：');
+  parts.push('  - 单source团队：团队名-会议记录文件名，例如：SEED-20260507-项目周会-会议记录');
+  if (msNames.length > 0) {
+    parts.push(`  - 多source团队（${msNames.join('、')}）：团队名-label-会议记录文件名，例如：经典剑侠系列-大部门-20260512-经典剑侠项目周例会`);
+  }
+  parts.push('例如：');
+  parts.push('| 时间节点 | 责任方 | 关键事项 | 量化指标 | 来源会议 |');
+  parts.push('|----------|--------|----------|----------|----------|');
+  if (msNames.length > 0) {
+    parts.push('| 05-26 | 经典剑侠系列 | 完成新粒子系统适配 | 待明确 | 经典剑侠系列-大部门-20260512-经典剑侠项目周例会 |');
+  }
+  parts.push('| 05-14 | 音频中心 | 跟进需求管理 | 待明确 | 音频中心-20260506-音频中心周会-会议记录 |');
   parts.push('没有则写"本月内暂无明确时间节点。"');
   parts.push('## 3.2 中期节点（未来两个月）');
-  parts.push('同上格式的markdown表格，仅从数据中已识别的中期节点提取');
+  parts.push('同上格式和规则的markdown表格，仅从数据中已识别的中期节点提取');
   parts.push('## 3.3 持续跟进事项');
-  parts.push('无明确时间节点但需持续跟进的重要事项，用•列表，格式：• 【团队名】事项描述（来源：团队名-会议名称）');
+  parts.push('无明确时间节点但需持续跟进的重要事项，用•列表，格式：• 【团队名】事项描述；多source团队必须用格式：• 【团队名-label】事项描述。正文不输出来源尾注。');
   parts.push('');
   parts.push('# 四、各团队会议汇总');
   parts.push('对每个团队写一个小节：');
   parts.push('## 团队名');
   parts.push('### 会议统计');
-  parts.push('一句话总结会议数量和重要会议');
+  parts.push('用简短表格或一句话总结会议数量、核心议题数、关键决议数和重要会议数，语气保持外发报告风格。');
   parts.push('### 核心议题');
-  parts.push('仅从该团队的"核心议题"数据中概括，3-8条（•列表），每条用一句话概括原文结论');
+  parts.push(`仅从该团队的"核心议题"数据中概括，3-8条（•列表），每条用一句话概括原文结论，不输出来源尾注。`);
   if (msNames.length > 0) {
-    parts.push(`多source团队（${msNames.join('、')}）的每条必须加【子项目名】前缀，如：• 【子项目A】xxx`);
+    parts.push(`多source团队（${msNames.join('、')}）的每条必须加【团队名-label】前缀，如：• 【剑网3系列-剑网3】xxx`);
   }
   parts.push('### 关键决议');
-  parts.push('仅从该团队的结论数据中提取，3-8条（•列表），直接引用或简述原文决议内容');
+  parts.push(`仅从该团队的结论数据中提取，3-8条（•列表），直接引用或简述原文决议内容，不输出来源尾注。`);
   if (msNames.length > 0) {
-    parts.push('多source团队的每条必须加【子项目名】前缀');
+    parts.push('多source团队的每条必须加【团队名-label】前缀');
   }
   parts.push('');
   parts.push('');
-  parts.push('⚠️ 来源标注规则：');
-  parts.push('- 单source团队：来源格式为"团队名-文档标题"，例如：（来源：测试部门0-20260422-质量周会）');
+  parts.push('⚠️ 来源标注规则（所有章节统一执行）：');
+  parts.push('- 正文段落与普通 bullet 不写来源尾注；只在风险矩阵、节点表和附录的"来源会议"列中保留来源。');
+  parts.push('- 单source团队表格来源格式：团队名-会议记录文件名，例如：SEED-20260507-项目周会-会议记录');
   if (msNames.length > 0) {
-    parts.push(`- 多source团队（${msNames.join('、')}）：来源格式为"团队名·子项目名-文档标题"，例如：（来源：团队名·子项目-20260422-质量汇报会）`);
+    parts.push(`- 多source团队（${msNames.join('、')}）表格来源格式：团队名-label-会议记录文件名，例如：经典剑侠系列-大部门-20260512-经典剑侠项目周例会`);
+    parts.push('- label 必须严格来自 config.json 的 sources[].label；禁止使用会议标题中的【剧情】、【专项】等文本替代 label。');
   }
   parts.push('');
   if (msNames.length > 0) {
     parts.push('⚠️ 多source团队内容分离规则：');
     parts.push(`${msNames.join('、')}这${msNames.length}个团队包含多个子项目（数据中已用## 子项目名分隔），`);
-    parts.push('在所有章节中必须用【子项目名】标注每条内容的归属，不同子项目的内容不得混淆。');
-    parts.push('例如：• 【子项目A】xxx、• 【子项目B】xxx。第四章按子项目分小节。');
+    parts.push('在所有章节中必须用【团队名-label】标注每条内容的归属，不同子项目的内容不得混淆。');
+    parts.push('例如：• 【剑网3系列-剑网3】xxx、• 【剑网3系列-剑网3缘起】xxx。第四章按子项目分小节。');
   }
   parts.push('');
   parts.push('# 五、综合评估与建议');
-  parts.push('按战略主题分组撰写（不按团队分组），3-6个主题，每个：');
+  parts.push('按战略主题分组撰写（不按团队分组），4-5个主题，主题应类似"版本发布与质量保障 / AI应用与效能提升 / 项目风险管控 / 团队协同与流程规范 / 合规与风险前置管理"，每个：');
   parts.push('## 5.N 主题标题');
-  parts.push('概述段落（一句话总结当前状态，必须引用数据中的具体事实）');
+  parts.push('概述段落（1段，直接引用数据中的具体事实但不写来源尾注）');
   parts.push('• **推进较好**：团队名（引用该团队数据中的具体结论或待办原文作为依据）');
   parts.push('• **推进一般**：团队名（同上，必须有数据支撑）');
   parts.push('• **待加强**：团队名（同上，必须有数据支撑）');
   parts.push('（某个分级如果数据中找不到支撑依据则省略该分级，不要强凑）');
-  parts.push('**建议**：一句话具体可执行的行动建议');
+  parts.push('**建议**：1-2条编号建议，每条一句话，具体可执行。');
   parts.push('');
   parts.push('【再次强调 — 反幻觉检查清单（输出前逐条自检）】');
   parts.push('1. 报告中每一条事实陈述，是否都能在上面的数据中找到对应原文？找不到则删除。');
@@ -1506,6 +2559,9 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
 // ========== 单团队报告 prompt ==========
 function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   const { startDate, endDate, isMultiSource } = options;
+  const reportLimits = options.reportLimits || {};
+  const promptMinItems = Number(reportLimits.promptMinItems) || 5;
+  const promptMaxItems = Number(reportLimits.promptMaxItems) || 12;
   const parts = [];
 
   parts.push(`你是一位项目管理分析师。你的唯一信息来源是下面提供的会议数据，数据中没有的内容绝对不允许出现在报告中。`);
@@ -1526,11 +2582,12 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   for (const doc of data.documents) {
     const name = (doc.name || '').replace(/\.(otl|docx)$/i, '');
     parts.push(`### ${name}${doc.important ? '（重要会议）' : ''}`);
+    parts.push(`  来源：${formatSourceRef(teamName, doc)}`);
     if (doc.conclusions && doc.conclusions.length > 0) {
-      doc.conclusions.forEach(c => parts.push(`  结论：${c}`));
+      doc.conclusions.forEach(c => parts.push(`  结论：${withSourceRef(c, formatSourceRef(teamName, doc))}`));
     }
     if (doc.todos && doc.todos.length > 0) {
-      doc.todos.forEach(t => parts.push(`  待办：${t}`));
+      doc.todos.forEach(t => parts.push(`  待办：${withSourceRef(t, formatSourceRef(teamName, doc))}`));
     }
     parts.push('');
   }
@@ -1541,8 +2598,8 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   }
   if (analysis.highRisks.length > 0 || analysis.midRisks.length > 0) {
     parts.push('## 已识别风险');
-    analysis.highRisks.forEach(r => parts.push(`• [高][${r.keyword}] ${r.text}`));
-    analysis.midRisks.forEach(r => parts.push(`• [中][${r.keyword}] ${r.text}`));
+    analysis.highRisks.forEach(r => parts.push(`• [高][${r.keyword}] ${withSourceRef(r.text, r.source)}`));
+    analysis.midRisks.forEach(r => parts.push(`• [中][${r.keyword}] ${withSourceRef(r.text, r.source)}`));
     parts.push('');
   }
   if (analysis.nearTermNodes.length > 0 || analysis.midTermNodes.length > 0) {
@@ -1555,44 +2612,47 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
 
   parts.push('## 输出要求');
   parts.push('');
+  parts.push(`第四章的"核心议题"和"关键决议"分别输出 ${promptMinItems}-${promptMaxItems} 条；数据足够时优先接近上限，不要固定只写3条。`);
   parts.push('请按以下结构输出纯 markdown（不要代码块包裹），从"## 1.2 主要趋势"开始：');
   parts.push('');
   parts.push('## 1.2 主要趋势');
-  parts.push('列出3-5条该团队的主要趋势和核心发现，每条必须注明来源（格式：来源：团队名-文档标题）');
+  parts.push('按公司层级信息贯通进行总结，列出5-6条跨团队、跨项目的主要趋势；不要照抄用户参考条目，不要按单个团队流水账罗列。每条用自然段式bullet输出，先写公司层面的趋势判断，再串联支撑该趋势的部门/项目事实。');
   parts.push('');
   parts.push('# 二、风险点分析');
   parts.push('先写一句概述，然后：');
   parts.push('## 2.1 高风险事项');
   parts.push('仅从上面"已识别风险"中标记为[高]的条目提取，用原文改写，不得新增数据中不存在的风险。');
-  parts.push('每条格式：• 【高】风险描述（不超过120字）（来源：团队名-文档标题）。没有则写"本期未发现高风险事项。"');
+  parts.push('每条格式：• 【高】风险描述（不超过120字）（来源：团队名-文档标题；多source用团队名-label-文档标题）。没有则写"本期未发现高风险事项。"');
   parts.push('## 2.2 中风险事项');
-  parts.push('仅从上面标记为[中]的条目提取。每条格式：• 【中】风险描述（来源：团队名-文档标题）');
+  parts.push('仅从上面标记为[中]的条目提取。每条格式：• 【中】风险描述（来源：团队名-文档标题；多source用团队名-label-文档标题）');
   parts.push('## 2.3 风险矩阵');
-  parts.push('输出markdown表格，4列：风险项、等级、影响范围、来源会议。仅包含2.1和2.2中已列出的风险，不得新增。例如：');
-  parts.push('| 风险项 | 等级 | 影响范围 | 来源会议 |');
-  parts.push('|--------|------|----------|----------|');
-  parts.push('| 某项目性能不达标 | 高 | 产品口碑、发布节点 | 团队名-20260402-质量汇报会 |');
+  parts.push('输出markdown表格，只保留3列：风险项、等级、影响范围。去掉量化影响和来源会议两列；影响范围必须填写所属部门或项目名称，不要写泛化影响描述。仅包含2.1和2.2中已列出的风险，不得新增。');
+  parts.push('| 风险项 | 等级 | 影响范围 |');
+  parts.push('|--------|------|----------|');
+  parts.push('| 剑侠世界4外网性能不达标 | 高 | 剑侠世界系列 |');
   parts.push('');
   parts.push('# 三、重点关注节点');
   parts.push('先写一句概述，然后：');
   parts.push('## 3.1 近期节点（本月内）');
   parts.push('仅从上面"已识别时间节点"中提取，不得编造不存在的时间节点。');
-  parts.push('输出markdown表格，4列：时间节点、责任方、关键事项、来源会议（格式：团队名-文档标题）。没有则写"本月内暂无明确时间节点。"');
+  parts.push('输出markdown表格，4列：时间节点、责任方、关键事项、来源会议（单source格式：团队名-文档标题；多source格式：团队名-label-文档标题）。没有则写"本月内暂无明确时间节点。"');
   parts.push('## 3.2 中期节点（未来两个月）');
   parts.push('同上格式的markdown表格，仅从数据中已识别的中期节点提取');
   parts.push('## 3.3 持续跟进事项');
-  parts.push('无明确时间节点但需持续跟进的重要事项，用•列表，每条注明来源（格式：团队名-文档标题）');
+  parts.push('无明确时间节点但需持续跟进的重要事项，用•列表，每条注明来源（单source格式：团队名-文档标题；多source格式：团队名-label-文档标题）；多source团队必须用【团队名-label】前缀');
   parts.push('');
   parts.push('# 四、团队会议汇总');
   parts.push('### 核心议题');
-  parts.push('仅从上面各会议的结论和议题数据中概括，5-8条，每条用一句话概括原文，注明来源（格式：团队名-文档标题）');
+  parts.push(`仅从上面各会议的结论和议题数据中概括，${promptMinItems}-${promptMaxItems}条，每条用一句话概括原文，注明来源（单source格式：团队名-文档标题；多source格式：团队名-label-文档标题）`);
   if (isMultiSource) {
-    parts.push('本团队是多source团队，每条必须加【子项目名】前缀，如：• 【子项目名】xxx（来源：团队名·子项目名-文档标题）');
+    parts.push('本团队是多source团队，每条必须加【团队名-label】前缀，如：• 【经典剑侠系列-大部门】xxx（来源：团队名-label-文档标题）');
+    parts.push('label 只能使用 config.json 中该 source 的 label，禁止从会议标题括号、文件名前缀或正文标题中自行生成 label。');
   }
   parts.push('### 关键决议');
-  parts.push('仅从上面各会议的结论数据中提取，5-8条，直接引用或简述原文决议，注明来源（格式：团队名-文档标题）');
+  parts.push(`仅从上面各会议的结论数据中提取，${promptMinItems}-${promptMaxItems}条，直接引用或简述原文决议，注明来源（单source格式：团队名-文档标题；多source格式：团队名-label-文档标题）`);
   if (isMultiSource) {
-    parts.push('本团队是多source团队，每条必须加【子项目名】前缀');
+    parts.push('本团队是多source团队，每条必须加【团队名-label】前缀，并在来源中保留团队名-label-文档标题');
+    parts.push('label 必须严格来自 config sourceLabel；例如剑网3系列只能使用“剑网3”或“剑网3缘起”，不能使用“剧情”等标题分类。');
   }
   parts.push('');
   parts.push('# 五、综合评估与建议');
@@ -1691,7 +2751,7 @@ function parseReportMarkdown(markdown) {
       elements.push(h2(trimmed.replace(/^##\s+/, '')));
       lastType = 'h2';
     } else if (/^\*\*建议[：:]?\*\*/.test(trimmed) || /^建议[：:]/.test(trimmed)) {
-      const text = trimmed.replace(/^\*\*建议[：:]?\*\*[：:\s]*/, '').replace(/^建议[：:\s]*/, '');
+      const text = stripInlineSourceRefs(trimmed.replace(/^\*\*建议[：:]?\*\*[：:\s]*/, '').replace(/^建议[：:\s]*/, ''));
       if (text) {
         elements.push(new Paragraph({ spacing: { before: 160, after: 0 }, children: [] }));
         elements.push(p(text, { bold: true, before: 120 }));
@@ -1700,25 +2760,25 @@ function parseReportMarkdown(markdown) {
     } else if (/^[•\-\*]\s+\*\*/.test(trimmed)) {
       const m = trimmed.match(/^[•\-\*]\s+\*\*([^*]+)\*\*[：:\s]*(.*)/);
       if (m) {
-        elements.push(bullet(m[2] || '', { bold: m[1] + '：' }));
+        elements.push(bullet(stripInlineSourceRefs(m[2] || ''), { bold: stripInlineSourceRefs(m[1]) + '：' }));
       } else {
-        elements.push(bullet(trimmed.replace(/^[•\-\*]\s+/, '')));
+        elements.push(bullet(stripInlineSourceRefs(trimmed.replace(/^[•\-\*]\s+/, ''))));
       }
       lastType = 'bullet';
     } else if (/^[•\-\*]\s+/.test(trimmed)) {
-      elements.push(bullet(trimmed.replace(/^[•\-\*]\s+/, '')));
+      elements.push(bullet(stripInlineSourceRefs(trimmed.replace(/^[•\-\*]\s+/, ''))));
       lastType = 'bullet';
     } else if (/^\d+[.、]\s+/.test(trimmed)) {
-      elements.push(bullet(trimmed.replace(/^\d+[.、]\s+/, '')));
+      elements.push(bullet(stripInlineSourceRefs(trimmed.replace(/^\d+[.、]\s+/, ''))));
       lastType = 'bullet';
     } else if (/^\*\*[^*]+\*\*[：:]?\s*$/.test(trimmed)) {
       if (lastType === 'bullet' || lastType === 'p') {
         elements.push(new Paragraph({ spacing: { before: 120, after: 0 }, children: [] }));
       }
-      elements.push(p(trimmed.replace(/^\*\*/, '').replace(/\*\*[：:]?\s*$/, ''), { bold: true }));
+      elements.push(p(stripInlineSourceRefs(trimmed.replace(/^\*\*/, '').replace(/\*\*[：:]?\s*$/, '')), { bold: true }));
       lastType = 'bold-p';
     } else {
-      elements.push(p(trimmed));
+      elements.push(p(stripInlineSourceRefs(trimmed)));
       lastType = 'p';
     }
   }
@@ -1793,6 +2853,48 @@ function getTeamSources(teamCfg) {
   return [];
 }
 
+function monthNameToMonthNumber(monthName) {
+  const text = String(monthName || '');
+  const match = text.match(/(^|\D)(1[0-2]|0?[1-9])\s*(月|鏈)/);
+  return match ? Number(match[2]) : null;
+}
+
+function rangeMonthNumbers(startDate, endDate) {
+  const startMatch = String(startDate || '').match(/(\d{1,2})[.\-](\d{1,2})/);
+  const endMatch = String(endDate || '').match(/(\d{1,2})[.\-](\d{1,2})/);
+  if (!startMatch || !endMatch) return null;
+
+  const startMonth = Number(startMatch[1]);
+  const endMonth = Number(endMatch[1]);
+  if (startMonth < 1 || startMonth > 12 || endMonth < 1 || endMonth > 12) return null;
+
+  const months = new Set();
+  if (startMonth <= endMonth) {
+    for (let month = startMonth; month <= endMonth; month++) months.add(month);
+  } else {
+    for (let month = startMonth; month <= 12; month++) months.add(month);
+    for (let month = 1; month <= endMonth; month++) months.add(month);
+  }
+  return months;
+}
+
+function selectMonthEntriesForRange(sources, startDate, endDate, fallbackLabel) {
+  const monthSet = rangeMonthNumbers(startDate, endDate);
+  return sources.flatMap(source =>
+    Object.entries(source.months || {})
+      .filter(([monthName]) => {
+        const monthNumber = monthNameToMonthNumber(monthName);
+        return !monthSet || monthNumber === null || monthSet.has(monthNumber);
+      })
+      .map(([monthName, folderId]) => ({
+        source,
+        monthName,
+        folderId,
+        label: source.label || fallbackLabel
+      }))
+  );
+}
+
 function isMultiSourceTeam(teamCfg) {
   return teamCfg.sources && teamCfg.sources.length > 1;
 }
@@ -1804,17 +2906,23 @@ function getMultiSourceTeamNames(config) {
 module.exports = {
   C, FONT, cellBorders, hCell, cCell, bullet, h1, h2, h3, p, pb,
   makeHeader, makeFooter, makeCoverPage,
-  cleanText, isValidConclusion, makeSuggestion, textSimilar, dedupTexts, splitConcatenated, riskKeywords, analyzeDocs, generateStrategicAnalysis, extractInfo,
+  cleanText, isValidConclusion, makeSuggestion, textSimilar, dedupTexts, splitConcatenated, riskKeywords, analyzeDocs, generateStrategicAnalysis, extractParticipants, extractInfo,
+  formatSourceRef, withSourceRef, stripInlineSourceRefs, normalizeMultiSourceBulletPrefixes,
   callLLM, buildComprehensiveReportPrompt, buildTeamReportPrompt, parseReportMarkdown,
-  docStyles, docNumbering, resolveWorkspaceDir,
-  currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, dateInRange, getWeekKey,
+  compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
+  docStyles, docNumbering, resolveWorkspaceDir, ensureOutputDir, outputPath, findInputFile, readInputJson, writeOutputJson,
+  getBaselineFileName, createMeetingBaseline, writeMeetingBaseline, readMeetingBaseline,
+  currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, extractDateFromContent, extractMeetingDate, dateInRange, getWeekKey,
   listFolder, scanFolder, scanFolderWithStats, scanFolderAll, scanFolderFromDate,
-  listFolderAsync, scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
-  RequestPacer, sleep,
+  listFolderAsync, searchFilesAsync: searchFilesAsyncRateLimited, dateToUnixSeconds,
+  scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
+  getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, dedupeKdocsFiles,
+  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv,
+  getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   normalizeTitle, normalizeForMatch, charSimilarity,
   sleepSync,
   teamDocsCacheDir, teamFoldersCacheDir, ensureCacheDir, readCache, writeCache, clearFolderCache,
-  getTeamSources, isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
+  getTeamSources, selectMonthEntriesForRange, isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, HeadingLevel, PageNumber, PageBreak,
   BorderStyle, WidthType, ShadingType, VerticalAlign, LevelFormat

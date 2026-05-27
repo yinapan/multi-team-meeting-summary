@@ -2,9 +2,9 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { getKdocsCliPath, getKdocsCliEnv } = require('./shared');
 
 const driveId = process.argv[2];
-const KDOCS_CLI = process.env.KDOCS_CLI_PATH || (process.platform === 'win32' ? path.join(process.env.LOCALAPPDATA || '', 'kdocs-cli', 'kdocs-cli.exe') : 'kdocs-cli');
 const fileIds = process.argv.slice(3);
 
 if (!driveId || fileIds.length === 0) {
@@ -16,12 +16,13 @@ for (const fid of fileIds) {
   const inputJson = JSON.stringify({ drive_id: driveId, file_id: fid, format: 'markdown', include_elements: 'para' });
 
   try {
-    const raw = execFileSync(KDOCS_CLI, ['drive', 'read-file-content', '--output', 'json'], {
+    const raw = execFileSync(getKdocsCliPath(), ['drive', 'read-file-content', '--output', 'json'], {
       input: inputJson,
       encoding: 'utf-8',
       timeout: 30000,
       maxBuffer: 1024 * 1024,
-      windowsHide: true
+      windowsHide: true,
+      env: getKdocsCliEnv()
     });
 
     const obj = JSON.parse(raw);

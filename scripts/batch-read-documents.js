@@ -1,21 +1,29 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamSources, scanFolderWithStatsAsync, RequestPacer, extractInfo } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamSources, selectMonthEntriesForRange, scanFilesByMode, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
 
-const CONCURRENCY = parseInt(process.env.KDOCS_CONCURRENCY, 10) || 5;
-const KDOCS_CLI = process.env.KDOCS_CLI_PATH || (process.platform === 'win32' ? path.join(process.env.LOCALAPPDATA || '', 'kdocs-cli', 'kdocs-cli.exe') : 'kdocs-cli');
+const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
-function readDocAsync(driveId, fileId, mtime, teamName) {
+async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
   const cacheFile = path.join(teamDocsCacheDir(teamName), `${fileId}.json`);
   const cached = readCache(cacheFile);
   if (cached && cached.mtime === mtime) {
-    return Promise.resolve(cached.content);
+    return cached.content;
   }
 
+  if (pacer) await pacer.acquire();
   return new Promise((resolve) => {
+    let released = false;
+    const release = () => {
+      if (!released && pacer) {
+        released = true;
+        pacer.release();
+      }
+    };
     const inputJson = JSON.stringify({ drive_id: driveId, file_id: fileId, format: "markdown", include_elements: "para" });
-    const child = require('child_process').spawn(KDOCS_CLI, ['drive', 'read-file-content', '--output', 'json'], {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
+    if (pacer && typeof pacer.noteRequest === 'function') pacer.noteRequest('read');
+    const child = require('child_process').spawn(getKdocsCliPath(), ['drive', 'read-file-content', '--output', 'json'], {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
     });
     let stdout = '';
     let stderr = '';
@@ -24,31 +32,78 @@ function readDocAsync(driveId, fileId, mtime, teamName) {
     child.stderr.on('data', d => { stderr += d; });
     child.on('close', (code) => {
       clearTimeout(timer);
+      release();
       if (code !== 0 || !stdout) {
         if (stderr) process.stderr.write(`[readDoc] 失败 file=${fileId}: ${stderr.substring(0, 100)}\n`);
+        if (cached && cached.content) {
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+          resolve(cached.content);
+          return;
+        }
         resolve('');
         return;
       }
       try {
         const result = JSON.parse(stdout);
+        if (result && result.code && result.code !== 0) {
+          if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteRateLimit === 'function') {
+            pacer.noteRateLimit();
+          }
+          process.stderr.write(`[readDoc] API error file=${fileId} code=${result.code}\n`);
+          if (cached && cached.content) {
+            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+            process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+            resolve(cached.content);
+            return;
+          }
+          resolve('');
+          return;
+        }
         const content = (result && result.data && result.data.data && result.data.data.markdown) || '';
         if (content) {
+          if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
           writeCache(cacheFile, { content, mtime, fetched_at: Date.now() });
         }
         resolve(content);
       } catch (e) {
         process.stderr.write(`[readDoc] JSON解析失败 file=${fileId}: ${e.message.substring(0, 80)}\n`);
+        if (cached && cached.content) {
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+          resolve(cached.content);
+          return;
+        }
         resolve('');
       }
     });
     child.on('error', (e) => {
       clearTimeout(timer);
+      release();
       process.stderr.write(`[readDoc] 启动失败 file=${fileId}: ${e.message.substring(0, 100)}\n`);
+      if (cached && cached.content) {
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+        process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+        resolve(cached.content);
+        return;
+      }
       resolve('');
     });
     child.stdin.write(inputJson);
     child.stdin.end();
   });
+}
+
+async function readDocAsync(driveId, fileId, mtime, teamName, pacer) {
+  const maxAttempts = Number(getKdocsConfig().documentReadRetries) || 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const content = await readDocOnceAsync(driveId, fileId, mtime, teamName, pacer);
+    if (content || attempt === maxAttempts - 1) return content;
+    if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+    const delay = Math.min(3000 * Math.pow(2, attempt), 15000) + Math.floor(Math.random() * 500);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  return '';
 }
 
 async function runPool(tasks, concurrency) {
@@ -70,6 +125,26 @@ async function runPool(tasks, concurrency) {
   return results;
 }
 
+function writeRunDiagnostics(workspaceDir, pacer, failedDocuments, startedAt, warmCacheOnly) {
+  const elapsedSec = Number(((Date.now() - startedAt) / 1000).toFixed(1));
+  const stats = {
+    mode: warmCacheOnly ? 'warm-cache' : 'normal',
+    elapsedSec,
+    failedDocuments: failedDocuments.length,
+    ...(pacer && typeof pacer.getStats === 'function' ? pacer.getStats() : {})
+  };
+
+  const statsFile = writeOutputJson('batch-read-stats.json', stats);
+
+  const failedFile = writeOutputJson('failed-documents.json', failedDocuments);
+
+  console.log(`stats: ${statsFile}`);
+  console.log(`failed-documents: ${failedFile} (${failedDocuments.length})`);
+  console.log(`API requests: total=${stats.requests || 0}, search=${stats.searchRequests || 0}, list=${stats.listRequests || 0}, read=${stats.readRequests || 0}`);
+  console.log(`limits/retries/cache: 429=${stats.rateLimits || 0}, retries=${stats.retries || 0}, staleCache=${stats.staleCacheFallbacks || 0}, cacheHit=${stats.cacheHits || 0}, apiFetch=${stats.apiFetches || 0}`);
+  console.log(`current interval: ${stats.currentIntervalMs || 0}ms`);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (!args[0] || !args[1]) {
@@ -77,8 +152,10 @@ async function main() {
     console.error('示例: node batch-read-documents.js 03-10 04-30');
     process.exit(1);
   }
+  const warmCacheOnly = args.includes('--warm-cache');
   const startDate = normalizeDate(args[0]);
   const endDate = normalizeDate(args[1]);
+  const overallStartTime = Date.now();
 
   const workspaceDir = resolveWorkspaceDir();
   const configFile = path.join(__dirname, '..', 'config.json');
@@ -86,6 +163,7 @@ async function main() {
 
   const importantPeople = config.important_people || [];
   const allTeamsData = [];
+  const failedDocuments = [];
   const pacer = new RequestPacer();
 
   for (let ti = 0; ti < config.teams.length; ti++) {
@@ -95,33 +173,53 @@ async function main() {
     let teamTotalScanned = 0;
 
     const sources = getTeamSources(teamCfg);
-    const monthEntries = sources.flatMap(source =>
-      Object.entries(source.months || {}).map(([monthName, folderId]) => ({ source, monthName, folderId, label: source.label || teamCfg.name }))
-    );
+    const monthEntries = selectMonthEntriesForRange(sources, startDate, endDate, teamCfg.name);
 
-    const scanResults = await Promise.all(
-      monthEntries.map(({ source, folderId }) =>
-        scanFolderWithStatsAsync(source.drive_id, folderId, startDate, endDate, teamCfg.name, pacer)
-      )
-    );
+    const scanMode = getKdocsScanMode();
 
-    for (let i = 0; i < monthEntries.length; i++) {
-      const { label, monthName, folderId } = monthEntries[i];
-      const { files, totalScanned } = scanResults[i];
-      console.log(`扫描 ${label ? label + ' ' : ''}${monthName}: ${folderId}`);
-      files.forEach(f => f.sourceLabel = label);
-      allFiles.push(...files);
-      teamTotalScanned += totalScanned;
-      console.log(`  -> ${files.length}/${totalScanned} 个文件匹配`);
+    try {
+      for (const entry of monthEntries) {
+        const { files, stats } = await scanFilesByMode(entry, {
+          teamName: teamCfg.name,
+          startDate,
+          endDate,
+          pacer,
+          mode: scanMode
+        });
+        files.forEach(f => f.sourceLabel = entry.label);
+        allFiles.push(...files);
+        teamTotalScanned += stats.totalScanned || files.length;
+        const supplement = stats.recursiveSupplementCount ? `，递归补 ${stats.recursiveSupplementCount}` : '';
+        console.log(`扫描 ${entry.label ? entry.label + ' ' : ''}${entry.monthName}: ${files.length}/${stats.totalScanned || files.length} 个文件匹配 [${stats.mode}; search ${stats.searchCount}; recursive ${stats.recursiveCount}${supplement}]`);
+      }
+    } catch (e) {
+      process.stderr.write(`[batch-read] ${scanMode} 扫描失败 ${teamCfg.name}: ${e.message}\n`);
+      allFiles.length = 0;
+      teamTotalScanned = 0;
+      for (const entry of monthEntries) {
+        const { files, stats } = await scanFilesByMode(entry, {
+          teamName: teamCfg.name,
+          startDate,
+          endDate,
+          pacer,
+          mode: 'recursive'
+        });
+        files.forEach(f => f.sourceLabel = entry.label);
+        allFiles.push(...files);
+        teamTotalScanned += stats.totalScanned || files.length;
+        console.log(`  fallback ${entry.label ? entry.label + ' ' : ''}${entry.monthName}: ${files.length}/${stats.totalScanned || files.length} 个文件匹配`);
+      }
     }
 
-    if (allFiles.length === 0) {
+    const dateMatchedCount = allFiles.length;
+    if (dateMatchedCount === 0) {
       console.log('  无匹配文件，跳过');
-      allTeamsData.push({ team: teamCfg.name, documents: [], totalScanned: teamTotalScanned });
+      allTeamsData.push({ team: teamCfg.name, documents: [], totalScanned: 0 });
       continue;
     }
 
-    console.log(`并发读取 ${allFiles.length} 篇文档 (并发数: ${CONCURRENCY})...`);
+    console.log(`并发读取 ${dateMatchedCount} 篇文档 (并发数: ${CONCURRENCY})...`);
+    if (warmCacheOnly) console.log('  warm-cache mode: preloading caches without overwriting summary outputs');
     ensureCacheDir(teamCfg.name);
     let cacheHit = 0, apiFetch = 0;
     const startTime = Date.now();
@@ -130,9 +228,28 @@ async function main() {
       const cacheFile = path.join(teamDocsCacheDir(teamCfg.name), `${f.id}.json`);
       const cached = readCache(cacheFile);
       const isCached = cached && cached.mtime === f.mtime;
-      if (isCached) cacheHit++; else apiFetch++;
+      if (isCached) {
+        cacheHit++;
+        if (pacer && typeof pacer.noteCacheHit === 'function') pacer.noteCacheHit();
+      } else {
+        apiFetch++;
+        if (pacer && typeof pacer.noteApiFetch === 'function') pacer.noteApiFetch();
+      }
 
-      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name).then(md => {
+      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer).then(md => {
+        if (!md) {
+          failedDocuments.push({
+            team: teamCfg.name,
+            sourceLabel: f.sourceLabel || null,
+            name: f.name,
+            id: f.id,
+            drive_id: f.drive_id,
+            url: f.link || '',
+            mtime: f.mtime || null
+          });
+          return null;
+        }
+        if (warmCacheOnly) return null;
         const teamPeople = teamCfg.leader ? [...importantPeople, teamCfg.leader] : importantPeople;
         const info = extractInfo(md, f.name, teamPeople);
         info.url = f.link;
@@ -145,14 +262,20 @@ async function main() {
       });
     });
 
-    const documents = await runPool(tasks, CONCURRENCY);
+    const documents = (await runPool(tasks, CONCURRENCY)).filter(Boolean);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n  完成: ${documents.length} 篇, 耗时 ${elapsed}s [cache] 命中 ${cacheHit} 篇, API 拉取 ${apiFetch} 篇`);
 
-    allTeamsData.push({ team: teamCfg.name, documents, totalScanned: teamTotalScanned });
+    allTeamsData.push({ team: teamCfg.name, documents, totalScanned: dateMatchedCount });
   }
 
   // 按周分组保存为 all-team-summaries 格式
+  if (warmCacheOnly) {
+    writeRunDiagnostics(workspaceDir, pacer, failedDocuments, overallStartTime, warmCacheOnly);
+    console.log('warm-cache complete; summary outputs were not overwritten.');
+    return;
+  }
+
   const teamSummaries = allTeamsData.map(td => {
     const weeks = {};
     for (const doc of td.documents) {
@@ -175,19 +298,35 @@ async function main() {
     return { team: td.team, weeks };
   });
 
-  const outFile = path.join(workspaceDir, 'all-team-summaries.json');
-  fs.writeFileSync(outFile, JSON.stringify(teamSummaries, null, 2), 'utf-8');
+  const outFile = writeOutputJson('all-team-summaries.json', teamSummaries);
   console.log(`\n已保存: ${outFile}`);
 
   // 同时保存每个团队的独立数据文件（供报告生成脚本使用）
   for (const td of allTeamsData) {
-    const teamFile = path.join(workspaceDir, `team-summary-${td.team}.json`);
-    fs.writeFileSync(teamFile, JSON.stringify(td, null, 2), 'utf-8');
+    const teamFile = writeOutputJson(`team-summary-${td.team}.json`, td);
     console.log(`  -> ${teamFile}`);
   }
 
+  const { baseline, file: baselineFile } = writeMeetingBaseline(allTeamsData, {
+    startDate,
+    endDate,
+    source: 'batch-read-documents'
+  });
+  console.log(`baseline: ${baselineFile}`);
+  console.log(`counts: meetingList=${baseline.counts.meetingListCount}, successfulRead=${baseline.counts.successfulReadCount}, analyzed=${baseline.counts.analyzedDocumentCount}`);
+
   const totalDocs = allTeamsData.reduce((sum, t) => sum + t.documents.length, 0);
+  const overallElapsed = ((Date.now() - overallStartTime) / 1000).toFixed(1);
+  writeRunDiagnostics(workspaceDir, pacer, failedDocuments, overallStartTime, warmCacheOnly);
+  console.log(`总耗时: ${overallElapsed}s`);
   console.log(`\n汇总: ${config.teams.length} 个团队, ${totalDocs} 篇文档`);
 }
 
-main().catch(console.error);
+if (require.main === module) {
+  main().catch(console.error);
+}
+
+module.exports = {
+  readDocAsync,
+  runPool
+};

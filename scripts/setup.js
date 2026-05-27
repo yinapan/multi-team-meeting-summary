@@ -1,8 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const { execSync } = require('child_process');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
+
+function ensureDependencies() {
+  try {
+    require.resolve('docx');
+  } catch (_) {
+    console.log('首次运行，安装 npm 依赖...');
+    execSync('npm install --production', { cwd: path.join(__dirname, '..'), stdio: 'inherit' });
+  }
+}
 
 function createRL() {
   return readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
@@ -27,6 +37,8 @@ function parseKDocsLink(url) {
 }
 
 async function main() {
+  ensureDependencies();
+
   const lines = [];
   const isPiped = !process.stdin.isTTY;
 
@@ -139,11 +151,29 @@ async function main() {
   const config = {
     version: '1.0.0',
     org_name: orgName,
+    kdocs: {
+      token: '',
+      cliPath: '',
+      cacheTtlMs: 3600000,
+      folderConcurrency: 2,
+      minIntervalMs: 2000,
+      rateLimitCooldownMs: 30000,
+      adaptiveMaxIntervalMs: 3000,
+      adaptiveStepMs: 500,
+      recoverySuccesses: 20,
+      documentConcurrency: 2,
+      documentReadRetries: 2,
+      useSearch: true
+    },
+    report: {
+      perDocumentItemLimit: 5,
+      sectionItemLimit: 12,
+      multiSourceSectionItemLimit: 10,
+      promptMinItems: 5,
+      promptMaxItems: 12
+    },
     important_people: importantPeople,
     llm: {
-      command: 'claude',
-      args: ['-p'],
-      model: null,
       timeout: 300000
     },
     teams

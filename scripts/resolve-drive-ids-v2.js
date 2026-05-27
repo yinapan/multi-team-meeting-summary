@@ -1,16 +1,16 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-
-const KDOCS_CLI = process.env.LOCALAPPDATA + '\\kdocs-cli\\kdocs-cli.exe';
+const { getKdocsCliPath, getKdocsCliEnv } = require('./shared');
 
 function getFileInfo(fileId) {
   try {
-    const raw = execFileSync(KDOCS_CLI, ['drive', 'get-file-info', '--compact'], {
+    const raw = execFileSync(getKdocsCliPath(), ['drive', 'get-file-info', '--compact'], {
       input: JSON.stringify({ file_id: fileId }),
       encoding: 'utf-8',
       timeout: 15000,
-      windowsHide: true
+      windowsHide: true,
+      env: getKdocsCliEnv()
     });
     const parsed = JSON.parse(raw);
     if (parsed && parsed.data && parsed.data.data) return parsed.data.data;
@@ -22,11 +22,12 @@ function getFileInfo(fileId) {
 
 function listFolders(driveId, parentId) {
   try {
-    const raw = execFileSync(KDOCS_CLI, ['drive', 'list-files', '--compact'], {
+    const raw = execFileSync(getKdocsCliPath(), ['drive', 'list-files', '--compact'], {
       input: JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 100, filter_type: 'folder' }),
       encoding: 'utf-8',
       timeout: 15000,
-      windowsHide: true
+      windowsHide: true,
+      env: getKdocsCliEnv()
     });
     const parsed = JSON.parse(raw);
     if (parsed && parsed.data && parsed.data.data && parsed.data.data.items) return parsed.data.data.items;
