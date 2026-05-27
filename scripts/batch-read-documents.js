@@ -48,11 +48,14 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
         const result = JSON.parse(stdout);
         if (result && result.code && result.code !== 0) {
           if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteRateLimit === 'function') {
-            pacer.noteRateLimit();
+            pacer.noteRateLimit(0);
           }
           process.stderr.write(`[readDoc] API error file=${fileId} code=${result.code}\n`);
           if (cached && cached.content) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+            if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteCacheRebuild === 'function') {
+              pacer.noteCacheRebuild('rate-limit-document-cache');
+            }
             process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
             resolve(cached.content);
             return;
@@ -133,6 +136,7 @@ function writeRunDiagnostics(workspaceDir, pacer, failedDocuments, startedAt, wa
     failedDocuments: failedDocuments.length,
     ...(pacer && typeof pacer.getStats === 'function' ? pacer.getStats() : {})
   };
+  if (stats.cacheRebuildUsed) stats.mode = 'cache-rebuild';
 
   const statsFile = writeOutputJson('batch-read-stats.json', stats);
 
@@ -142,6 +146,9 @@ function writeRunDiagnostics(workspaceDir, pacer, failedDocuments, startedAt, wa
   console.log(`failed-documents: ${failedFile} (${failedDocuments.length})`);
   console.log(`API requests: total=${stats.requests || 0}, search=${stats.searchRequests || 0}, list=${stats.listRequests || 0}, read=${stats.readRequests || 0}`);
   console.log(`limits/retries/cache: 429=${stats.rateLimits || 0}, retries=${stats.retries || 0}, staleCache=${stats.staleCacheFallbacks || 0}, cacheHit=${stats.cacheHits || 0}, apiFetch=${stats.apiFetches || 0}`);
+  if (stats.cacheRebuildUsed) {
+    console.log('⚠️ 检测到 KDocs 限流，已使用缓存数据继续生成。限流解除后请重新跑数据以刷新最新内容。');
+  }
   console.log(`current interval: ${stats.currentIntervalMs || 0}ms`);
 }
 

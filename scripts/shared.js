@@ -172,6 +172,12 @@ class RequestPacer {
     this.stats.staleCacheFallbacks++;
   }
 
+  noteCacheRebuild(reason = 'cache') {
+    this.stats.cacheRebuildUsed = true;
+    if (!this.stats.cacheRebuildReasons) this.stats.cacheRebuildReasons = {};
+    this.stats.cacheRebuildReasons[reason] = (this.stats.cacheRebuildReasons[reason] || 0) + 1;
+  }
+
   noteCacheHit() {
     this.stats.cacheHits++;
   }
@@ -888,6 +894,13 @@ function retryDelay(attempt) {
   return base + Math.floor(Math.random() * 1000);
 }
 
+function shouldUseCacheImmediately(parsedOrCode) {
+  const cfg = getKdocsConfig();
+  if (cfg.useCacheOnRateLimit === false) return false;
+  const code = typeof parsedOrCode === 'number' ? parsedOrCode : parsedOrCode && parsedOrCode.code;
+  return RETRY_CODES.has(code);
+}
+
 async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests') {
   if (!pacer) return spawnKdocsCli(args, inputJson, timeout);
   await pacer.acquire();
@@ -930,6 +943,15 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
     try {
       const parsed = JSON.parse(stdout);
       if (parsed && parsed.code && parsed.code !== 0) {
+        if (shouldUseCacheImmediately(parsed)) {
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(0);
+          if (cached) {
+            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+            if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+            process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, using cached folder data\n`);
+            return cached.items;
+          }
+        }
         if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
           if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit();
           if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
@@ -1218,7 +1240,13 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
       if (parsed && parsed.code && parsed.code !== 0) {
         lastCode = parsed.code;
         if (RETRY_CODES.has(parsed.code)) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit();
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(shouldUseCacheImmediately(parsed) ? 0 : undefined);
+          if (shouldUseCacheImmediately(parsed) && cached) {
+            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+            if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+            process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, using cached search data\n`);
+            return cached.items;
+          }
           if (attempt < MAX_RETRIES) {
             if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
             await sleep(retryDelay(attempt));

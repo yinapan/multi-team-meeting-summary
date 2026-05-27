@@ -556,6 +556,11 @@ async function main() {
     }
     throw e;
   }
+  const batchStatsFile = outputPath('batch-read-stats.json');
+  const batchStats = fs.existsSync(batchStatsFile) ? JSON.parse(fs.readFileSync(batchStatsFile, 'utf-8')) : null;
+  const dataSourceMode = batchStats && (batchStats.mode === 'cache-rebuild' || batchStats.cacheRebuildUsed)
+    ? 'cache-rebuild'
+    : 'direct-read';
   const statsFile = writeOutputJson('comprehensive-report-generation-stats.json', {
     type: 'comprehensive-report',
     startDate,
@@ -566,6 +571,10 @@ async function main() {
     llmUsed: generationMode === 'llm' || generationMode === 'llm-with-rules-supplement',
     rulesFallbackUsed: generationMode === 'rules-fallback' || ruleFallbackSections.length > 0,
     output: path.basename(outFile),
+    dataSourceMode,
+    cacheRebuildReason: dataSourceMode === 'cache-rebuild'
+      ? 'KDocs 返回限流，报告使用本地缓存数据生成；限流解除后需要重新跑数据。'
+      : null,
     baseline: baseline.counts,
     documents: reportCounts.analyzedDocumentCount,
     teams: teamCount
@@ -578,8 +587,11 @@ async function main() {
     statsFile,
     mode: generationMode,
     llmUsed: generationMode === 'llm' || generationMode === 'llm-with-rules-supplement',
-    timingSummary: `会议清单 ${reportCounts.meetingListCount} 条，成功读取 ${reportCounts.successfulReadCount} 份，纳入分析 ${reportCounts.analyzedDocumentCount} 份，覆盖团队 ${teamCount} 个`
+    timingSummary: `会议清单 ${reportCounts.meetingListCount} 条，成功读取 ${reportCounts.successfulReadCount} 份，纳入分析 ${reportCounts.analyzedDocumentCount} 份，覆盖团队 ${teamCount} 个，数据来源：${dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中'}`
   });
+  if (dataSourceMode === 'cache-rebuild') {
+    console.log('⚠️ 本次综合报告使用缓存数据生成；KDocs 限流解除后需要重新跑数据。');
+  }
 }
 
 main().catch(console.error);

@@ -32,6 +32,13 @@ function readJsonIfExists(file) {
   return JSON.parse(fs.readFileSync(file, 'utf-8'));
 }
 
+function cacheModeLabel(batchStats) {
+  if (batchStats?.mode === 'cache-rebuild' || batchStats?.cacheRebuildUsed) {
+    return 'cache-rebuild';
+  }
+  return 'direct-read';
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (!args[0] || !args[1]) {
@@ -52,8 +59,10 @@ function main() {
   });
   timings.push({ module: '生成综合分析报告', elapsedSec: runNode('generate-comprehensive-report.js', [startDate, endDate]) });
 
+  const batchStats = readJsonIfExists(outputPath('batch-read-stats.json'));
   const teamStats = readJsonIfExists(outputPath('report-generation-stats.json'));
   const comprehensiveStats = readJsonIfExists(outputPath('comprehensive-report-generation-stats.json'));
+  const dataSourceMode = cacheModeLabel(batchStats);
   const timingSummary = timings.map(t => `${t.module}:${t.elapsedSec}s`).join('；');
   const llmUsed = Boolean(teamStats?.summary?.llm || comprehensiveStats?.llmUsed);
   const mode = comprehensiveStats?.mode || (llmUsed ? 'llm' : 'rules-fallback');
@@ -65,7 +74,12 @@ function main() {
     generatedAt: new Date().toISOString(),
     mode,
     llmUsed,
+    dataSourceMode,
+    cacheRebuildReason: dataSourceMode === 'cache-rebuild'
+      ? 'KDocs 返回限流，已用本地缓存数据重建输出；限流解除后需要重新跑数据刷新最新内容。'
+      : null,
     timings,
+    batchRead: batchStats || null,
     teamSummary: teamStats?.summary || null,
     comprehensive: comprehensiveStats || null
   };
@@ -78,8 +92,11 @@ function main() {
     statsFile,
     mode,
     llmUsed,
-    timingSummary
+    timingSummary: `${timingSummary}；数据来源:${dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中'}`
   });
+  if (dataSourceMode === 'cache-rebuild') {
+    console.log('⚠️ 本次结果已标记为“限流后缓存重建”。KDocs 限流解除后，请重新运行 npm run report -- <start> <end> 刷新数据。');
+  }
 }
 
 if (require.main === module) {
