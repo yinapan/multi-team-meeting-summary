@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  scanFolderAllAsync, normalizeForMatch, normalizeTitle, charSimilarity, getTeamSources, RequestPacer,
+  scanFolderAllAsync, normalizeForMatch, normalizeTitle, charSimilarity, getTeamScanEntries, RequestPacer,
   findInputFile, writeOutputJson
 } = require('./shared');
 
@@ -21,9 +21,7 @@ async function main() {
   const allFiles = [];
 
   const scanTasks = config.teams.flatMap(teamCfg =>
-    getTeamSources(teamCfg).flatMap(source =>
-      Object.entries(source.months || {}).map(([monthName, folderId]) => ({ teamCfg, source, monthName, folderId }))
-    )
+    getTeamScanEntries(teamCfg).map(entry => ({ teamCfg, ...entry }))
   );
 
   console.log(`并行扫描 ${scanTasks.length} 个文件夹...`);

@@ -2,7 +2,8 @@ const assert = require('assert');
 const {
   getKdocsScanMode,
   shouldHybridRecursiveScan,
-  dedupeKdocsFiles
+  dedupeKdocsFiles,
+  getTeamScanEntries
 } = require('./shared');
 
 assert.strictEqual(getKdocsScanMode(), 'recursive');
@@ -26,5 +27,39 @@ const deduped = dedupeKdocsFiles([
   { link: 'https://example.test/b', name: 'b-copy.otl' }
 ]);
 assert.strictEqual(deduped.length, 2);
+
+const normalized = dedupeKdocsFiles([
+  { id: '3', name: 'c.otl', link: 'https://example.test/c' }
+]);
+assert.strictEqual(normalized[0].link, 'https://example.test/c');
+
+const teamCfg = {
+  name: 'TeamA',
+  sources: [{
+    label: 'ProjectA',
+    drive_id: 'drive-a',
+    root_folder_id: 'root-a',
+    months: {
+      '5月': 'folder-may',
+      '4月': 'folder-apr'
+    }
+  }]
+};
+
+const rootEntries = getTeamScanEntries(teamCfg);
+assert.deepStrictEqual(rootEntries.map(e => ({
+  label: e.label,
+  folderId: e.folderId,
+  monthName: e.monthName,
+  scope: e.scope
+})), [{
+  label: 'ProjectA',
+  folderId: 'root-a',
+  monthName: '_root',
+  scope: 'root'
+}]);
+
+const configuredEntries = getTeamScanEntries(teamCfg, { useRoot: false });
+assert.deepStrictEqual(configuredEntries.map(e => e.folderId), ['folder-may', 'folder-apr']);
 
 console.log('scan policy tests passed');

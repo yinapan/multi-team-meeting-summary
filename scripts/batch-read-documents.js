@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamSources, selectMonthEntriesForRange, scanFilesByMode, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamScanEntries, scanFilesByMode, dedupeKdocsFiles, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
@@ -172,8 +172,7 @@ async function main() {
     const allFiles = [];
     let teamTotalScanned = 0;
 
-    const sources = getTeamSources(teamCfg);
-    const monthEntries = selectMonthEntriesForRange(sources, startDate, endDate, teamCfg.name);
+    const monthEntries = getTeamScanEntries(teamCfg);
 
     const scanMode = getKdocsScanMode();
 
@@ -184,7 +183,8 @@ async function main() {
           startDate,
           endDate,
           pacer,
-          mode: scanMode
+          mode: scanMode,
+          includeAll: true
         });
         files.forEach(f => f.sourceLabel = entry.label);
         allFiles.push(...files);
@@ -202,7 +202,8 @@ async function main() {
           startDate,
           endDate,
           pacer,
-          mode: 'recursive'
+          mode: 'recursive',
+          includeAll: true
         });
         files.forEach(f => f.sourceLabel = entry.label);
         allFiles.push(...files);
@@ -211,14 +212,18 @@ async function main() {
       }
     }
 
-    const dateMatchedCount = allFiles.length;
-    if (dateMatchedCount === 0) {
+    const uniqueFiles = dedupeKdocsFiles(allFiles);
+    allFiles.length = 0;
+    allFiles.push(...uniqueFiles);
+
+    const candidateCount = allFiles.length;
+    if (candidateCount === 0) {
       console.log('  无匹配文件，跳过');
-      allTeamsData.push({ team: teamCfg.name, documents: [], totalScanned: 0 });
+      allTeamsData.push({ team: teamCfg.name, documents: [], totalScanned: 0, meetingListCount: 0, unreadableMeetings: [], excludedMeetings: [] });
       continue;
     }
 
-    console.log(`并发读取 ${dateMatchedCount} 篇文档 (并发数: ${CONCURRENCY})...`);
+    console.log(`并发读取 ${candidateCount} 篇候选文档 (并发数: ${CONCURRENCY})...`);
     if (warmCacheOnly) console.log('  warm-cache mode: preloading caches without overwriting summary outputs');
     ensureCacheDir(teamCfg.name);
     let cacheHit = 0, apiFetch = 0;
@@ -237,6 +242,7 @@ async function main() {
       }
 
       return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer).then(md => {
+        f._readContent = md || '';
         if (!md) {
           failedDocuments.push({
             team: teamCfg.name,
@@ -249,9 +255,12 @@ async function main() {
           });
           return null;
         }
+        if (!dateInRange(f.name, startDate, endDate, md)) return null;
         if (warmCacheOnly) return null;
         const teamPeople = teamCfg.leader ? [...importantPeople, teamCfg.leader] : importantPeople;
         const info = extractInfo(md, f.name, teamPeople);
+        info.id = f.id;
+        info.drive_id = f.drive_id;
         info.url = f.link;
         info.sourceLabel = f.sourceLabel || null;
         const num = i + 1;
@@ -262,11 +271,34 @@ async function main() {
       });
     });
 
-    const documents = (await runPool(tasks, CONCURRENCY)).filter(Boolean);
+    const rawResults = await runPool(tasks, CONCURRENCY);
+    const documents = rawResults.filter(Boolean);
+    const analyzedIds = new Set(documents.map(doc => doc.id).filter(Boolean));
+    const failedKeys = new Set(failedDocuments.filter(doc => doc.team === teamCfg.name).map(doc => doc.id).filter(Boolean));
+    const meetingListItems = allFiles
+      .filter(f => !failedKeys.has(f.id) && dateInRange(f.name, startDate, endDate, f._readContent || ''))
+      .map(f => ({ name: f.name, id: f.id, url: f.link || '', sourceLabel: f.sourceLabel || null }));
+    const excludedMeetings = allFiles
+      .filter(f => !meetingListItems.some(item => item.id === f.id) && !failedKeys.has(f.id))
+      .map(f => ({ name: f.name, id: f.id, url: f.link || '', reason: 'out_of_date_range_after_content_check' }));
+    const diagnosticExcludedMeetings = excludedMeetings.slice(0, 50);
+    const unreadableMeetings = allFiles
+      .filter(f => failedKeys.has(f.id))
+      .map(f => ({ name: f.name, id: f.id, url: f.link || '', reason: 'read_failed' }));
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n  完成: ${documents.length} 篇, 耗时 ${elapsed}s [cache] 命中 ${cacheHit} 篇, API 拉取 ${apiFetch} 篇`);
 
-    allTeamsData.push({ team: teamCfg.name, documents, totalScanned: dateMatchedCount });
+    allTeamsData.push({
+      team: teamCfg.name,
+      documents,
+      totalScanned: meetingListItems.length,
+      scanCandidateCount: candidateCount,
+      meetingListCount: meetingListItems.length,
+      meetingListItems,
+      unreadableMeetings,
+      excludedMeetings: diagnosticExcludedMeetings,
+      excludedMeetingCount: excludedMeetings.length
+    });
   }
 
   // 按周分组保存为 all-team-summaries 格式

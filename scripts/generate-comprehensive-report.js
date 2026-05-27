@@ -395,6 +395,8 @@ async function main() {
     successfulReadCount: grandTotalDocs,
     analyzedDocumentCount: grandTotalDocs
   });
+  const unreadableMeetings = (baseline && Array.isArray(baseline.unreadableMeetings)) ? baseline.unreadableMeetings : [];
+  const excludedMeetings = (baseline && Array.isArray(baseline.excludedMeetings)) ? baseline.excludedMeetings : [];
 
   const teamCount = teamDataList.length;
   const inclusionRate = reportCounts.meetingListCount > 0 ? Math.round((reportCounts.analyzedDocumentCount / reportCounts.meetingListCount) * 100) : 100;
@@ -513,15 +515,7 @@ async function main() {
             new TableRow({ tableHeader: true, children: [hCell("团队", 2200), hCell("主要会议类型", 2400), hCell("文档数", 1200), hCell("结论数", 1200), hCell("待办数", 2026)] }),
             ...teamDataList.map(td => new TableRow({ children: [
               cCell(td.teamName, 2200),
-              cCell([...new Set(td.data.documents.map(d => {
-                const n = d.name;
-                if (n.includes('AI')) return 'AI组';
-                if (n.includes('平台')) return '平台组';
-                if (n.includes('质量')) return '质量周会';
-                if (n.includes('测试')) return '测试周会';
-                if (n.includes('项目')) return '项目优化';
-                return '其他';
-              }))].join('、'), 2400),
+              cCell(summarizePrimaryMeetingTypes(td.data.documents, 5), 2400),
               cCell(`${td.data.documents.length}份`, 1200),
               cCell(`${td.analysis.totalConclusions}`, 1200),
               cCell(`${td.analysis.totalTodos}`, 2026)
@@ -536,6 +530,11 @@ async function main() {
             new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 3013, { bold: true }), cCell("进入正文分析与附录统计的文档", 3013)] }),
             new TableRow({ children: [cCell("文档纳入率", 3000), cCell(`${inclusionRate}%`, 3013, { bold: true }), cCell(`${reportCounts.analyzedDocumentCount}/${reportCounts.meetingListCount}`, 3013)] })
           ]}),
+          ...(unreadableMeetings.length || excludedMeetings.length ? [
+            new Paragraph({ spacing: { before: 260 }, children: [] }),
+            h2("未纳入项说明"),
+            p(`本期有${unreadableMeetings.length}条会议清单项读取失败，${excludedMeetings.length}条文档在正文日期校验后未纳入分析。`)
+          ] : []),
           new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "— 报告完 —", color: C.gray, size: 20, font: FONT })] })
         ]
       }

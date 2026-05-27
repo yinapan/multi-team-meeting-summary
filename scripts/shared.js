@@ -635,6 +635,18 @@ function listFolder(driveId, parentId, teamName) {
   return [];
 }
 
+function normalizeKdocsFile(item, driveId) {
+  return {
+    name: item.name,
+    id: item.id,
+    link: item.link || item.link_url || item.url || '',
+    size: item.size,
+    drive_id: item.drive_id || driveId || '',
+    mtime: item.mtime,
+    parent_id: item.parent_id || ''
+  };
+}
+
 function scanFolder(driveId, folderId, startDate, endDate, teamName) {
   const files = [];
   const items = listFolder(driveId, folderId, teamName);
@@ -643,7 +655,7 @@ function scanFolder(driveId, folderId, startDate, endDate, teamName) {
       files.push(...scanFolder(driveId, item.id, startDate, endDate, teamName));
     } else if (item.type === 'file' && /\.(otl|docx)$/i.test(item.name)) {
       if (dateInRange(item.name, startDate, endDate)) {
-        files.push({ name: item.name, id: item.id, link: item.link_url, size: item.size, drive_id: driveId, mtime: item.mtime });
+        files.push(normalizeKdocsFile(item, driveId));
       }
     }
   }
@@ -662,7 +674,7 @@ function scanFolderWithStats(driveId, folderId, startDate, endDate, teamName) {
     } else if (item.type === 'file' && /\.(otl|docx)$/i.test(item.name)) {
       totalScanned++;
       if (dateInRange(item.name, startDate, endDate)) {
-        files.push({ name: item.name, id: item.id, link: item.link_url, size: item.size, drive_id: driveId, mtime: item.mtime });
+        files.push(normalizeKdocsFile(item, driveId));
       }
     }
   }
@@ -837,7 +849,7 @@ function scanFolderAll(driveId, folderId, teamName) {
     if (item.type === 'folder') {
       files.push(...scanFolderAll(driveId, item.id, teamName));
     } else if (item.type === 'file' && /\.(otl|docx)$/i.test(item.name)) {
-      files.push({ name: item.name, id: item.id, link: item.link_url, size: item.size, drive_id: driveId, mtime: item.mtime });
+      files.push(normalizeKdocsFile(item, driveId));
     }
   }
   return files;
@@ -958,7 +970,7 @@ async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, 
   const subResults = await Promise.all(subFolderPromises);
   const files = items
     .filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name) && dateInRange(i.name, startDate, endDate))
-    .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, drive_id: driveId, mtime: i.mtime }));
+    .map(i => normalizeKdocsFile(i, driveId));
   return files.concat(subResults.flat());
 }
 
@@ -971,7 +983,7 @@ async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, t
   const docFiles = items.filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name));
   const matchedFiles = docFiles
     .filter(i => dateInRange(i.name, startDate, endDate))
-    .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, drive_id: driveId, mtime: i.mtime }));
+    .map(i => normalizeKdocsFile(i, driveId));
   const files = matchedFiles.concat(subResults.flatMap(r => r.files));
   const totalScanned = docFiles.length + subResults.reduce((s, r) => s + r.totalScanned, 0);
   return { files, totalScanned };
@@ -985,7 +997,7 @@ async function scanFolderAllAsync(driveId, folderId, teamName, pacer) {
   const subResults = await Promise.all(subFolderPromises);
   const files = items
     .filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name))
-    .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, drive_id: driveId, mtime: i.mtime }));
+    .map(i => normalizeKdocsFile(i, driveId));
   return files.concat(subResults.flat());
 }
 
@@ -1002,7 +1014,7 @@ async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, 
       const d = extractDateFromFileName(i.name);
       return d && (d.month * 100 + d.day) >= startNum;
     })
-    .map(i => ({ name: i.name, id: i.id, link: i.link_url, size: i.size, drive_id: driveId, mtime: i.mtime }));
+    .map(i => normalizeKdocsFile(i, driveId));
   return files.concat(subResults.flat());
 }
 
@@ -1107,13 +1119,7 @@ async function searchFilesAsync(opts, teamName, pacer) {
         for (const item of items) {
           const file = item.file || item;
           allItems.push({
-            name: file.name,
-            id: file.id,
-            link: file.link_url || '',
-            size: file.size,
-            drive_id: file.drive_id || (opts.drive_ids.length === 1 ? opts.drive_ids[0] : ''),
-            mtime: file.mtime,
-            parent_id: file.parent_id || ''
+            ...normalizeKdocsFile(file, opts.drive_ids.length === 1 ? opts.drive_ids[0] : '')
           });
         }
         pageToken = data.next_page_token || data.page_token || null;
@@ -1235,13 +1241,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
       for (const item of items) {
         const file = item.file || item;
         allItems.push({
-          name: file.name,
-          id: file.id,
-          link: file.link_url || '',
-          size: file.size,
-          drive_id: file.drive_id || (opts.drive_ids.length === 1 ? opts.drive_ids[0] : ''),
-          mtime: file.mtime,
-          parent_id: file.parent_id || ''
+            ...normalizeKdocsFile(file, opts.drive_ids.length === 1 ? opts.drive_ids[0] : '')
         });
       }
       pageToken = data.next_page_token || data.page_token || null;
@@ -1316,23 +1316,39 @@ function getDocumentListFromTeamEntry(entry) {
   return [];
 }
 
+function getMeetingListItemsFromTeamEntry(entry) {
+  if (!entry) return [];
+  if (Array.isArray(entry.meetingListItems)) return entry.meetingListItems;
+  return getDocumentListFromTeamEntry(entry).map(doc => ({
+    name: doc.name || doc.title || '',
+    id: doc.id || '',
+    url: doc.url || ''
+  }));
+}
+
 function createMeetingBaseline(teamEntries, options = {}) {
   const teams = (teamEntries || []).map(entry => {
     const team = entry.team || entry.teamName || (entry.data && entry.data.team) || '';
     const documents = getDocumentListFromTeamEntry(entry);
+    const meetingListItems = getMeetingListItemsFromTeamEntry(entry);
     const successfulReadCount = documents.filter(doc =>
       (doc.rawContent && String(doc.rawContent).trim()) ||
       (Array.isArray(doc.conclusions) && doc.conclusions.length > 0) ||
       (Array.isArray(doc.todos) && doc.todos.length > 0)
     ).length;
     const analyzedDocumentCount = documents.length;
-    const meetingListCount = Number(entry.totalScanned || entry.meetingListCount || analyzedDocumentCount);
+    const meetingListCount = Number(entry.meetingListCount || entry.totalScanned || meetingListItems.length || analyzedDocumentCount);
     return {
       team,
       meetingListCount,
       successfulReadCount,
       analyzedDocumentCount,
-      documentNames: documents.map(doc => doc.name || doc.title || '').filter(Boolean)
+      scanCandidateCount: Number(entry.scanCandidateCount || entry.totalScanned || 0),
+      excludedMeetingCount: Number(entry.excludedMeetingCount || 0),
+      documentNames: documents.map(doc => doc.name || doc.title || '').filter(Boolean),
+      meetingListItems,
+      unreadableMeetings: Array.isArray(entry.unreadableMeetings) ? entry.unreadableMeetings : [],
+      excludedMeetings: Array.isArray(entry.excludedMeetings) ? entry.excludedMeetings : []
     };
   });
 
@@ -1347,14 +1363,23 @@ function createMeetingBaseline(teamEntries, options = {}) {
     counts.meetingListCount = Number(options.meetingListCount);
   }
 
+  const unreadableMeetings = (options.unreadableMeetings || teams.flatMap(team =>
+    (team.unreadableMeetings || []).map(item => ({ team: team.team, ...item }))
+  )).filter(Boolean);
+  const excludedMeetings = (options.excludedMeetings || teams.flatMap(team =>
+    (team.excludedMeetings || []).map(item => ({ team: team.team, ...item }))
+  )).filter(Boolean);
+
   return {
-    version: 1,
+    version: 2,
     source: options.source || 'batch-read-documents',
     startDate: options.startDate || '',
     endDate: options.endDate || '',
     generatedAt: new Date().toISOString(),
     counts,
-    teams
+    teams,
+    unreadableMeetings,
+    excludedMeetings
   };
 }
 
@@ -2109,7 +2134,7 @@ function scanFolderFromDate(driveId, folderId, startMonth, startDay, teamName) {
     } else if (item.type === 'file' && /\.(otl|docx)$/i.test(item.name)) {
       const d = extractDateFromFileName(item.name);
       if (d && (d.month * 100 + d.day) >= startNum) {
-        files.push({ name: item.name, id: item.id, link: item.link_url, size: item.size, mtime: item.mtime });
+        files.push(normalizeKdocsFile(item, driveId));
       }
     }
   }
@@ -2897,6 +2922,30 @@ function getTeamSources(teamCfg) {
   return [];
 }
 
+function getTeamScanEntries(teamCfg, options = {}) {
+  const sources = getTeamSources(teamCfg);
+  const useRoot = options.useRoot !== false;
+  return sources.flatMap(source => {
+    const label = source.label || teamCfg.name;
+    if (useRoot && source.root_folder_id) {
+      return [{
+        source,
+        monthName: '_root',
+        folderId: source.root_folder_id,
+        label,
+        scope: 'root'
+      }];
+    }
+    return Object.entries(source.months || {}).map(([monthName, folderId]) => ({
+      source,
+      monthName,
+      folderId,
+      label,
+      scope: 'configured'
+    }));
+  });
+}
+
 function monthNameToMonthNumber(monthName) {
   const text = String(monthName || '');
   const match = text.match(/(^|\D)(1[0-2]|0?[1-9])\s*(月|鏈)/);
@@ -2967,7 +3016,7 @@ module.exports = {
   normalizeTitle, normalizeForMatch, charSimilarity,
   sleepSync,
   teamDocsCacheDir, teamFoldersCacheDir, ensureCacheDir, readCache, writeCache, clearFolderCache,
-  getTeamSources, selectMonthEntriesForRange, isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
+  getTeamSources, getTeamScanEntries, selectMonthEntriesForRange, isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, HeadingLevel, PageNumber, PageBreak,
   BorderStyle, WidthType, ShadingType, VerticalAlign, LevelFormat

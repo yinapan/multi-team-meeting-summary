@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   resolveWorkspaceDir, currentYear, searchFilesAsync, scanFolderAllAsync,
-  extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeTitle, normalizeForMatch, charSimilarity, getTeamSources,
+  extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeTitle, normalizeForMatch, charSimilarity, getTeamScanEntries,
   RequestPacer, extractParticipants, teamDocsCacheDir, readCache, getKdocsScanMode, scanFilesByMode,
   outputPath, findInputFile, writeOutputJson
 } = require('./shared');
@@ -822,6 +822,7 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
       if (!weekMap[weekKey]) weekMap[weekKey] = [];
       const title = normalizeTitle(docTitle, resolvedDate);
       const url = cached.url || '';
+      if (!url) continue;
       weekMap[weekKey].push({
         text: title,
         url,
@@ -1084,10 +1085,7 @@ function reconcileWithExistingKanban(scannedData, existingData, options = {}) {
 async function scanImportantCandidateFiles(teamCfg, pacer, options = {}) {
   const scanMode = options.scanMode || getKdocsScanMode();
   const scanFn = options.scanFilesByMode || scanFilesByMode;
-  const sources = getTeamSources(teamCfg);
-  const monthEntries = sources.flatMap(source =>
-    Object.entries(source.months || {}).map(([monthName, folderId]) => ({ source, monthName, folderId }))
-  );
+  const monthEntries = getTeamScanEntries(teamCfg);
   const allFiles = [];
 
   for (const entry of monthEntries) {
@@ -1181,10 +1179,7 @@ async function fullScan(config, importantMap) {
 
   const teamResults = await Promise.all(config.teams.map(async (teamCfg) => {
     const allFiles = [];
-    const sources = getTeamSources(teamCfg);
-    const monthEntries = sources.flatMap(source =>
-      Object.entries(source.months || {}).map(([monthName, folderId]) => ({ source, monthName, folderId }))
-    );
+    const monthEntries = getTeamScanEntries(teamCfg);
     for (const entry of monthEntries) {
       try {
         const { files, stats } = await scanFilesByMode(entry, {
@@ -1261,10 +1256,7 @@ async function incrementalScan(config, existingData, importantMap) {
       existingData.teams.push(existingTeam);
     }
 
-    const sources = getTeamSources(teamCfg);
-    const monthEntries = sources.flatMap(source =>
-      Object.entries(source.months || {}).map(([monthName, folderId]) => ({ source, monthName, folderId }))
-    );
+    const monthEntries = getTeamScanEntries(teamCfg);
 
     for (const entry of monthEntries) {
       let files;

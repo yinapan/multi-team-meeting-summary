@@ -39,9 +39,12 @@ assert.strictEqual(getBaselineFileName('05-11', '05-24'), 'meeting-baseline-0511
 assert.strictEqual(baseline.counts.meetingListCount, 4);
 assert.strictEqual(baseline.counts.successfulReadCount, 3);
 assert.strictEqual(baseline.counts.analyzedDocumentCount, 3);
+assert.strictEqual(baseline.version, 2);
 assert.strictEqual(baseline.teams[0].team, 'Alpha');
 assert.strictEqual(baseline.teams[0].meetingListCount, 3);
 assert.strictEqual(baseline.teams[0].successfulReadCount, 2);
+assert.deepStrictEqual(baseline.unreadableMeetings, []);
+assert.deepStrictEqual(baseline.excludedMeetings, []);
 
 assert.strictEqual(getRiskImpactScope({ team: 'Alpha', label: 'ProjectA' }), 'Alpha-ProjectA');
 assert.strictEqual(getRiskImpactScope({ team: 'Alpha' }), 'Alpha');
