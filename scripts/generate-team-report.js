@@ -6,6 +6,7 @@ const {
   cleanText, isValidConclusion, makeSuggestion, textSimilar, dedupTexts, analyzeDocs,
   callLLM, buildTeamReportPrompt, parseReportMarkdown,
   formatSourceRef, withSourceRef, normalizeMultiSourceBulletPrefixes,
+  formatGenerationMode, printAiReviewWarning,
   docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, readInputJson, writeOutputJson, normalizeDate, formatDateChinese, dateInRange,
   isMultiSourceTeam, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
@@ -524,6 +525,22 @@ async function main() {
     teams: reportGenerationStats
   });
   console.log(`报告生成模式统计: ${statsFile}`);
+  const llmCount = reportGenerationStats.filter(s => s.mode === 'llm').length;
+  const fallbackCount = reportGenerationStats.filter(s => s.mode === 'rules-fallback').length;
+  const skippedCount = reportGenerationStats.filter(s => s.mode === 'skipped').length;
+  const errorCount = reportGenerationStats.filter(s => s.mode === 'error').length;
+  const elapsedTeams = reportGenerationStats
+    .filter(s => typeof s.elapsedSec === 'number')
+    .map(s => `${s.team}:${s.elapsedSec}s`)
+    .join('；');
+  printAiReviewWarning({
+    title: '各团队会议记录汇总报告',
+    output: 'outputs/*-会议记录汇总分析报告-*.docx',
+    statsFile,
+    mode: llmCount > 0 ? 'llm' : (fallbackCount > 0 ? 'rules-fallback' : 'skipped'),
+    llmUsed: llmCount > 0,
+    timingSummary: `LLM ${llmCount} 个，规则回退 ${fallbackCount} 个，跳过 ${skippedCount} 个，失败 ${errorCount} 个${elapsedTeams ? `；${elapsedTeams}` : ''}`
+  });
 
   // 报告全部生成后，自动同步生成看板
   console.log('\n===== 同步生成会议看板 =====');

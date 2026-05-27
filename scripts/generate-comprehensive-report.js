@@ -9,6 +9,7 @@ const {
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
   docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, writeOutputJson, normalizeDate, formatDateChinese, dateInRange,
   readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, summarizePrimaryMeetingTypes,
+  printAiReviewWarning,
   isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, PageNumber
@@ -572,6 +573,14 @@ async function main() {
   });
   console.log(`综合报告生成模式统计: ${statsFile}`);
   console.log(`综合报告已生成: ${(buffer.length / 1024).toFixed(1)}KB -> ${path.basename(outFile)}`);
+  printAiReviewWarning({
+    title: '综合会议记录分析报告',
+    output: outFile,
+    statsFile,
+    mode: generationMode,
+    llmUsed: generationMode === 'llm' || generationMode === 'llm-with-rules-supplement',
+    timingSummary: `会议清单 ${reportCounts.meetingListCount} 条，成功读取 ${reportCounts.successfulReadCount} 份，纳入分析 ${reportCounts.analyzedDocumentCount} 份，覆盖团队 ${teamCount} 个`
+  });
 }
 
 main().catch(console.error);

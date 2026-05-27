@@ -38,6 +38,36 @@ function getKdocsCliArgs(args = []) {
   return cfg.token ? ['--token', cfg.token, ...args] : args;
 }
 
+function formatGenerationMode(mode) {
+  if (mode === 'llm' || mode === 'llm-with-rules-supplement') return 'LLM';
+  if (mode === 'rules-fallback') return '规则回退';
+  if (mode === 'skipped') return '跳过';
+  if (mode === 'error') return '失败';
+  return mode || '未知';
+}
+
+function printAiReviewWarning(context = {}) {
+  const title = context.title || '报告';
+  const output = context.output ? `\n输出文件：${context.output}` : '';
+  const stats = context.statsFile ? `\n生成统计：${context.statsFile}` : '';
+  const mode = context.mode ? `\n生成方式：${formatGenerationMode(context.mode)}` : '';
+  const llmUsed = typeof context.llmUsed === 'boolean'
+    ? `\n是否使用 LLM：${context.llmUsed ? '是' : '否'}`
+    : '';
+  const timing = context.timingSummary ? `\n模块耗时汇总：${context.timingSummary}` : '';
+  console.log([
+    '',
+    `⚠️ ${title}已生成，请务必人工审核后再对外使用。`,
+    'AI 生成内容可能存在遗漏、误读、归因错误或表格统计偏差，关键事实、风险等级、时间节点和责任归属请以原始会议记录为准。',
+    output,
+    mode,
+    llmUsed,
+    timing,
+    stats,
+    ''
+  ].filter(Boolean).join('\n'));
+}
+
 try {
   require.resolve('docx');
 } catch (_) {
@@ -2932,6 +2962,7 @@ module.exports = {
   scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, dedupeKdocsFiles,
   RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs,
+  formatGenerationMode, printAiReviewWarning,
   getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   normalizeTitle, normalizeForMatch, charSimilarity,
   sleepSync,
