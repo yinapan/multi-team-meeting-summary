@@ -472,6 +472,14 @@ async function main() {
   }
   console.log(`综合报告生成模式: ${generationMode === 'llm' ? 'LLM' : generationMode === 'rules-fallback' ? '规则回退' : generationMode}`);
 
+  const batchStatsFile = outputPath('batch-read-stats.json');
+  const batchStats = fs.existsSync(batchStatsFile) ? JSON.parse(fs.readFileSync(batchStatsFile, 'utf-8')) : null;
+  const dataSourceMode = batchStats && (batchStats.mode === 'cache-rebuild' || batchStats.cacheRebuildUsed)
+    ? 'cache-rebuild'
+    : 'direct-read';
+  const llmUsed = generationMode === 'llm' || generationMode === 'llm-with-rules-supplement';
+  const dataSourceLabel = dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中';
+
   const dateLabel = `${now.getFullYear()}年${formatDateChinese(startDate)} - ${formatDateChinese(endDate)}`;
   const coverSection = makeCoverPage({
     title1: '会议记录', title2: '汇总分析报告',
@@ -503,6 +511,13 @@ async function main() {
             new TableRow({ children: [cCell("核心议题数量", 3000), cCell(`${grandTotalConclusions}`, 6026)] }),
             new TableRow({ children: [cCell("关键决议数量", 3000), cCell(`${grandTotalTodos}`, 6026)] })
           ]}),
+          new Paragraph({ spacing: { before: 200 }, children: [] }),
+          h2("1.0 生成说明与复核提醒"),
+          p(`生成方式：${llmUsed ? '已使用 LLM 生成分析内容' : '未使用 LLM，使用规则回退生成'}；数据来源：${dataSourceLabel}。`),
+          p("⚠️ 本报告为 AI 生成产物，可能存在遗漏、误读、归因错误或表格统计偏差；关键事实、风险等级、时间节点和责任归属请务必结合原始会议记录人工审核。"),
+          ...(dataSourceMode === 'cache-rebuild' ? [
+            p("⚠️ 本次生成过程中检测到 KDocs 限流，报告使用本地缓存数据重建；限流解除后需要重新跑数据以刷新最新内容。")
+          ] : []),
           new Paragraph({ spacing: { before: 200 }, children: [] }),
           p(`本报告涵盖${teamDataList.map(t => t.teamName).join('、')}共${teamCount}个团队；会议清单共${reportCounts.meetingListCount}条，成功读取${reportCounts.successfulReadCount}份，纳入分析${reportCounts.analyzedDocumentCount}份。所有内容均基于实际会议记录文档提取，团队分类严格按配置映射关系归类。`),
 
@@ -556,11 +571,6 @@ async function main() {
     }
     throw e;
   }
-  const batchStatsFile = outputPath('batch-read-stats.json');
-  const batchStats = fs.existsSync(batchStatsFile) ? JSON.parse(fs.readFileSync(batchStatsFile, 'utf-8')) : null;
-  const dataSourceMode = batchStats && (batchStats.mode === 'cache-rebuild' || batchStats.cacheRebuildUsed)
-    ? 'cache-rebuild'
-    : 'direct-read';
   const statsFile = writeOutputJson('comprehensive-report-generation-stats.json', {
     type: 'comprehensive-report',
     startDate,
@@ -568,7 +578,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     mode: generationMode,
     ruleFallbackSections,
-    llmUsed: generationMode === 'llm' || generationMode === 'llm-with-rules-supplement',
+    llmUsed,
     rulesFallbackUsed: generationMode === 'rules-fallback' || ruleFallbackSections.length > 0,
     output: path.basename(outFile),
     dataSourceMode,
@@ -586,8 +596,8 @@ async function main() {
     output: outFile,
     statsFile,
     mode: generationMode,
-    llmUsed: generationMode === 'llm' || generationMode === 'llm-with-rules-supplement',
-    timingSummary: `会议清单 ${reportCounts.meetingListCount} 条，成功读取 ${reportCounts.successfulReadCount} 份，纳入分析 ${reportCounts.analyzedDocumentCount} 份，覆盖团队 ${teamCount} 个，数据来源：${dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中'}`
+    llmUsed,
+    timingSummary: `会议清单 ${reportCounts.meetingListCount} 条，成功读取 ${reportCounts.successfulReadCount} 份，纳入分析 ${reportCounts.analyzedDocumentCount} 份，覆盖团队 ${teamCount} 个，数据来源：${dataSourceLabel}`
   });
   if (dataSourceMode === 'cache-rebuild') {
     console.log('⚠️ 本次综合报告使用缓存数据生成；KDocs 限流解除后需要重新跑数据。');

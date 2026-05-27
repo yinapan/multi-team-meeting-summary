@@ -502,6 +502,20 @@ assert.strictEqual(
   'orange',
   'current doc cache should mark historical kanban meetings with team leader participation'
 );
+
+const titleOnlyImportantMap = new Map();
+applyImportantRecordsToMap(titleOnlyImportantMap, [
+  {
+    team: cachedTeam,
+    title: 'NPC资源需求与优化方案讨论',
+    content: '参会人员：TeamLeader、张三、李四'
+  }
+], redPeople, { [cachedTeam]: 'TeamLeader' }, true);
+assert.strictEqual(
+  isImportantMeeting('https://www.kdocs.cn/l/cache-url', '20260429 - NPC资源需求与优化方案讨论', titleOnlyImportantMap),
+  'orange',
+  'cached title-only important markers should match kanban titles with date prefixes and urls'
+);
 fs.rmSync(path.join(__dirname, '..', 'cache', cachedTeam), { recursive: true, force: true });
 
 async function runAsyncTests() {

@@ -711,12 +711,24 @@ function classifyImportantByParticipants(participants, importantPeople, leader) 
 
 function importantKeysForMeeting(meeting) {
   const urlKey = normalizeKdocsUrl(meeting.url);
+  const rawTitle = meeting.name || meeting.title || meeting.text || '';
+  const normalizedTitle = normalizeTitle(rawTitle);
+  const matchTitle = normalizeForMatch(rawTitle);
+  const matchNormalizedTitle = normalizeForMatch(normalizedTitle);
+  const importantTitleKey = normalizeImportantTitleKey(rawTitle);
+  const importantNormalizedTitleKey = normalizeImportantTitleKey(normalizedTitle);
   return [
     meeting.url,
     urlKey,
+    meeting.id,
     meeting.name,
     meeting.title,
-    normalizeTitle(meeting.name || meeting.title || '')
+    meeting.text,
+    normalizedTitle,
+    matchTitle,
+    matchNormalizedTitle,
+    importantTitleKey,
+    importantNormalizedTitleKey
   ].filter(Boolean);
 }
 
@@ -725,6 +737,13 @@ function normalizeKdocsUrl(url) {
   if (!text) return '';
   const match = text.match(/\/l\/([^/?#]+)/);
   return match ? match[1] : text;
+}
+
+function normalizeImportantTitleKey(title) {
+  let text = String(title || '').replace(/\.(otl|docx)$/i, '');
+  text = text.replace(/^\s*20\d{2}[.\-]?\d{1,2}[.\-]?\d{1,2}\s*[\-—–_ ]*/i, '');
+  text = text.replace(/^\s*\d{1,2}[.\-]\d{1,2}\s*[\-—–_ ]*/i, '');
+  return normalizeForMatch(text);
 }
 
 function setImportantLevel(importantMap, keys, level, override = false) {
@@ -769,11 +788,31 @@ function applyCachedImportantRecord(importantMap, teamCfg, file, importantPeople
   return true;
 }
 
+function buildCachedFileMetaIndex(teamName) {
+  const foldersDir = path.join(path.dirname(teamDocsCacheDir(teamName)), 'folders');
+  const index = new Map();
+  if (!fs.existsSync(foldersDir)) return index;
+  for (const fileName of fs.readdirSync(foldersDir)) {
+    if (!fileName.endsWith('.json')) continue;
+    const cached = readCache(path.join(foldersDir, fileName));
+    for (const item of cached?.items || []) {
+      if (!item || item.type !== 'file' || !item.id) continue;
+      index.set(item.id, {
+        id: item.id,
+        name: item.name || '',
+        url: item.link_url || item.link || ''
+      });
+    }
+  }
+  return index;
+}
+
 function buildImportantSetFromDocCache(workspaceDir, config, importantPeople, teamLeaders) {
   const importantMap = new Map();
   for (const teamCfg of config?.teams || []) {
     const docsDir = teamDocsCacheDir(teamCfg.name);
     if (!fs.existsSync(docsDir)) continue;
+    const fileMetaIndex = buildCachedFileMetaIndex(teamCfg.name);
     for (const fileName of fs.readdirSync(docsDir)) {
       if (!fileName.endsWith('.json')) continue;
       const cached = readCache(path.join(docsDir, fileName));
@@ -785,13 +824,14 @@ function buildImportantSetFromDocCache(workspaceDir, config, importantPeople, te
       const firstLine = String(cached.content || '').split(/\r?\n/).find(line => line.trim()) || '';
       const docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim();
       const id = fileName.replace(/\.json$/i, '');
-      setImportantLevel(importantMap, [
+      const meta = fileMetaIndex.get(id) || {};
+      setImportantLevel(importantMap, importantKeysForMeeting({
         id,
-        docTitle,
-        normalizeTitle(docTitle),
-        cached.url,
-        normalizeKdocsUrl(cached.url)
-      ], level);
+        name: meta.name || docTitle,
+        title: docTitle,
+        text: docTitle,
+        url: cached.url || meta.url || ''
+      }), level);
     }
   }
   return importantMap;
@@ -954,6 +994,14 @@ function isImportantMeeting(url, title, importantMap) {
     if (importantMap.has(normalized)) return importantMap.get(normalized);
     const normalizedTitle = normalizeTitle(title);
     if (importantMap.has(normalizedTitle)) return importantMap.get(normalizedTitle);
+    const matchTitle = normalizeForMatch(title);
+    if (matchTitle && importantMap.has(matchTitle)) return importantMap.get(matchTitle);
+    const matchNormalizedTitle = normalizeForMatch(normalizedTitle);
+    if (matchNormalizedTitle && importantMap.has(matchNormalizedTitle)) return importantMap.get(matchNormalizedTitle);
+    const importantTitleKey = normalizeImportantTitleKey(title);
+    if (importantTitleKey && importantMap.has(importantTitleKey)) return importantMap.get(importantTitleKey);
+    const importantNormalizedTitleKey = normalizeImportantTitleKey(normalizedTitle);
+    if (importantNormalizedTitleKey && importantMap.has(importantNormalizedTitleKey)) return importantMap.get(importantNormalizedTitleKey);
   }
   return false;
 }
