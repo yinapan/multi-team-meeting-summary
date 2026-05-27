@@ -715,8 +715,6 @@ function importantKeysForMeeting(meeting) {
   const normalizedTitle = normalizeTitle(rawTitle);
   const matchTitle = normalizeForMatch(rawTitle);
   const matchNormalizedTitle = normalizeForMatch(normalizedTitle);
-  const importantTitleKey = normalizeImportantTitleKey(rawTitle);
-  const importantNormalizedTitleKey = normalizeImportantTitleKey(normalizedTitle);
   return [
     meeting.url,
     urlKey,
@@ -726,9 +724,7 @@ function importantKeysForMeeting(meeting) {
     meeting.text,
     normalizedTitle,
     matchTitle,
-    matchNormalizedTitle,
-    importantTitleKey,
-    importantNormalizedTitleKey
+    matchNormalizedTitle
   ].filter(Boolean);
 }
 
@@ -737,13 +733,6 @@ function normalizeKdocsUrl(url) {
   if (!text) return '';
   const match = text.match(/\/l\/([^/?#]+)/);
   return match ? match[1] : text;
-}
-
-function normalizeImportantTitleKey(title) {
-  let text = String(title || '').replace(/\.(otl|docx)$/i, '');
-  text = text.replace(/^\s*20\d{2}[.\-]?\d{1,2}[.\-]?\d{1,2}\s*[\-—–_ ]*/i, '');
-  text = text.replace(/^\s*\d{1,2}[.\-]\d{1,2}\s*[\-—–_ ]*/i, '');
-  return normalizeForMatch(text);
 }
 
 function setImportantLevel(importantMap, keys, level, override = false) {
@@ -847,6 +836,7 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
       continue;
     }
 
+    const fileMetaIndex = buildCachedFileMetaIndex(teamCfg.name);
     for (const fileName of fs.readdirSync(docsDir)) {
       if (!fileName.endsWith('.json')) continue;
       const cached = readCache(path.join(docsDir, fileName));
@@ -861,8 +851,9 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
 
       if (!weekMap[weekKey]) weekMap[weekKey] = [];
       const title = normalizeTitle(docTitle, resolvedDate);
-      const url = cached.url || '';
-      if (!url) continue;
+      const id = fileName.replace(/\.json$/i, '');
+      const meta = fileMetaIndex.get(id) || {};
+      const url = cached.url || meta.url || '';
       weekMap[weekKey].push({
         text: title,
         url,
@@ -998,10 +989,6 @@ function isImportantMeeting(url, title, importantMap) {
     if (matchTitle && importantMap.has(matchTitle)) return importantMap.get(matchTitle);
     const matchNormalizedTitle = normalizeForMatch(normalizedTitle);
     if (matchNormalizedTitle && importantMap.has(matchNormalizedTitle)) return importantMap.get(matchNormalizedTitle);
-    const importantTitleKey = normalizeImportantTitleKey(title);
-    if (importantTitleKey && importantMap.has(importantTitleKey)) return importantMap.get(importantTitleKey);
-    const importantNormalizedTitleKey = normalizeImportantTitleKey(normalizedTitle);
-    if (importantNormalizedTitleKey && importantMap.has(importantNormalizedTitleKey)) return importantMap.get(importantNormalizedTitleKey);
   }
   return false;
 }
@@ -1031,7 +1018,7 @@ async function resolveMeetingDateForFile(teamCfg, file, pacer) {
   let content = cached && cached.mtime === file.mtime ? (cached.content || '') : '';
 
   if (!content && file.drive_id) {
-    content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer);
+    content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '');
   }
 
   return { date: extractMeetingDate(file.name, content), content: content || '' };
@@ -1182,7 +1169,7 @@ async function refreshChangedImportantRecords(config, importantPeople, teamLeade
 
   let refreshed = 0;
   const tasks = filesToRead.map(({ teamCfg, file }) => async () => {
-    const content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer);
+    const content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '');
     if (!content) return null;
     refreshed++;
     return {
@@ -1453,13 +1440,13 @@ async function main() {
         console.log(`重要标记本地缓存补全: ${refreshStats.cachedApplied} 篇`);
       }
     }
-    applyImportantMarkersToKanbanData(kanbanData, importantMap);
+    applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: true });
   }
 
   if (config) {
     const cacheKanbanData = buildKanbanDataFromDocCache(workspaceDir, config, importantMap);
     kanbanData = enrichKanbanFromDocCache(kanbanData, cacheKanbanData);
-    applyImportantMarkersToKanbanData(kanbanData, importantMap);
+    applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: true });
   }
   kanbanData = pruneMeetingsWithoutConcreteDate(kanbanData);
 

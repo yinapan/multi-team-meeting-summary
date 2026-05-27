@@ -216,7 +216,12 @@ class RequestPacer {
     this.active--;
     if (this.queue.length > 0) {
       const next = this.queue.shift();
-      next();
+      const elapsed = Date.now() - this.lastRequestTime;
+      if (elapsed >= this.currentIntervalMs) {
+        next();
+      } else {
+        setTimeout(next, this.currentIntervalMs - elapsed);
+      }
     }
   }
 }
@@ -296,7 +301,7 @@ function cCell(t, w, o = {}) {
     shading: { fill: C.lightBlue, type: ShadingType.CLEAR },
     verticalAlign: VerticalAlign.CENTER,
     margins: { top: 80, bottom: 80, left: 120, right: 120 },
-    children: [new Paragraph({ children: [new TextRun({ text: t, bold: o.bold || false, color: o.color || C.text, font: FONT, size: 18 })] })]
+    children: [new Paragraph({ children: [new TextRun({ text: t, bold: o.bold || false, color: o.color || C.text, font: FONT, size: 20 })] })]
   });
 }
 
@@ -312,7 +317,7 @@ function bullet(t, o = {}) {
 
 function h1(t) { return new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: t, bold: true })] }); }
 function h2(t) { return new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun({ text: t, bold: true })] }); }
-function h3(t) { return new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun({ text: t, bold: true })] }); }
+function h3(t) { return new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun({ text: t, bold: true, color: '2E74B5' })] }); }
 function p(t, o = {}) { return new Paragraph({ spacing: { before: o.before || 160, after: o.after || 120, line: 276 }, alignment: AlignmentType.JUSTIFIED, children: [new TextRun({ text: t, bold: o.bold || false, font: FONT, size: 20, color: o.color || C.text })] }); }
 function pb() { return new Paragraph({ children: [new PageBreak()] }); }
 
@@ -579,24 +584,27 @@ function extractMeetingDate(fileName, markdown = '') {
   return extractDateFromFileName(fileName) || extractDateFromContent(markdown);
 }
 
-function dateInRange(fileName, startDate, endDate, markdown = '') {
-  const fileDate = extractMeetingDate(fileName, markdown);
-  if (!fileDate) return false;
+function meetingDateInRange(meetingDate, startDate, endDate) {
+  if (!meetingDate) return false;
   const startMatch = startDate.match(/(\d{1,2})[.\-](\d{1,2})/);
   const endMatch = endDate.match(/(\d{1,2})[.\-](\d{1,2})/);
   if (!startMatch || !endMatch) return false;
-  const fileNum = fileDate.month * 100 + fileDate.day;
+  const fileNum = meetingDate.month * 100 + meetingDate.day;
   const startNum = parseInt(startMatch[1]) * 100 + parseInt(startMatch[2]);
   const endNum = parseInt(endMatch[1]) * 100 + parseInt(endMatch[2]);
   if (startNum <= endNum) {
     return fileNum >= startNum && fileNum <= endNum;
   }
-  // Cross-year range (e.g., 12-20 to 01-15): match if >= start OR <= end
   return fileNum >= startNum || fileNum <= endNum;
 }
 
-function getWeekKey(fileName, markdown = '') {
-  const d = extractMeetingDate(fileName, markdown);
+function dateInRange(fileName, startDate, endDate, markdown = '') {
+  const fileDate = extractMeetingDate(fileName, markdown);
+  return meetingDateInRange(fileDate, startDate, endDate);
+}
+
+function getWeekKey(fileName, markdown = '', meetingDate = null) {
+  const d = meetingDate || extractMeetingDate(fileName, markdown);
   if (!d) return 'unknown';
   const date = new Date(currentYear(), d.month - 1, d.day);
   const dayOfWeek = date.getDay();
@@ -1011,10 +1019,11 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
 
 async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, pacer) {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
-  const subFolderPromises = items
-    .filter(i => i.type === 'folder')
-    .map(i => scanFolderAsync(driveId, i.id, startDate, endDate, teamName, pacer));
-  const subResults = await Promise.all(subFolderPromises);
+  const subFolders = items.filter(i => i.type === 'folder');
+  const subResults = [];
+  for (const sub of subFolders) {
+    subResults.push(await scanFolderAsync(driveId, sub.id, startDate, endDate, teamName, pacer));
+  }
   const files = items
     .filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name) && dateInRange(i.name, startDate, endDate))
     .map(i => normalizeKdocsFile(i, driveId));
@@ -1023,10 +1032,11 @@ async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, 
 
 async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, teamName, pacer) {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
-  const subFolderPromises = items
-    .filter(i => i.type === 'folder')
-    .map(i => scanFolderWithStatsAsync(driveId, i.id, startDate, endDate, teamName, pacer));
-  const subResults = await Promise.all(subFolderPromises);
+  const subFolders = items.filter(i => i.type === 'folder');
+  const subResults = [];
+  for (const sub of subFolders) {
+    subResults.push(await scanFolderWithStatsAsync(driveId, sub.id, startDate, endDate, teamName, pacer));
+  }
   const docFiles = items.filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name));
   const matchedFiles = docFiles
     .filter(i => dateInRange(i.name, startDate, endDate))
@@ -1038,10 +1048,11 @@ async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, t
 
 async function scanFolderAllAsync(driveId, folderId, teamName, pacer) {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
-  const subFolderPromises = items
-    .filter(i => i.type === 'folder')
-    .map(i => scanFolderAllAsync(driveId, i.id, teamName, pacer));
-  const subResults = await Promise.all(subFolderPromises);
+  const subFolders = items.filter(i => i.type === 'folder');
+  const subResults = [];
+  for (const sub of subFolders) {
+    subResults.push(await scanFolderAllAsync(driveId, sub.id, teamName, pacer));
+  }
   const files = items
     .filter(i => i.type === 'file' && /\.(otl|docx)$/i.test(i.name))
     .map(i => normalizeKdocsFile(i, driveId));
@@ -1051,10 +1062,11 @@ async function scanFolderAllAsync(driveId, folderId, teamName, pacer) {
 async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, teamName, pacer) {
   const startNum = startMonth * 100 + startDay;
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
-  const subFolderPromises = items
-    .filter(i => i.type === 'folder')
-    .map(i => scanFolderFromDateAsync(driveId, i.id, startMonth, startDay, teamName, pacer));
-  const subResults = await Promise.all(subFolderPromises);
+  const subFolders = items.filter(i => i.type === 'folder');
+  const subResults = [];
+  for (const sub of subFolders) {
+    subResults.push(await scanFolderFromDateAsync(driveId, sub.id, startMonth, startDay, teamName, pacer));
+  }
   const files = items
     .filter(i => {
       if (i.type !== 'file' || !/\.(otl|docx)$/i.test(i.name)) return false;
@@ -2608,9 +2620,9 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('先写一句概述，然后：');
   parts.push('## 2.1 高风险事项');
   parts.push('仅从上面"风险事项"章节中标记为[高]的条目中提取，用原文改写，不得新增数据中不存在的风险。');
-  parts.push('只保留对交付、质量、合规或用户体验影响最大的3-6条，合并同类项，避免把所有高风险原样堆叠。每条格式：• 【高】风险描述（不超过120字）。没有则写"本期未发现高风险事项。"');
+  parts.push('只保留对交付、质量、合规或用户体验影响最大的3-6条，合并同类项，避免把所有高风险原样堆叠。每条格式：• 【高】风险描述（不超过120字）。禁止在【高】后面加 **加粗小标题**，直接写风险描述。没有则写"本期未发现高风险事项。"');
   parts.push('## 2.2 中风险事项');
-  parts.push('仅从上面标记为[中]的条目中提取，保留5-8条代表性事项，合并同类项。每条格式：• 【中】风险描述。');
+  parts.push('仅从上面标记为[中]的条目中提取，保留5-8条代表性事项，合并同类项。每条格式：• 【中】风险描述。禁止在【中】后面加 **加粗小标题**，直接写风险描述。');
   parts.push('## 2.3 风险矩阵');
   parts.push('输出markdown表格，只保留3列：风险项、等级、影响范围。去掉量化影响和来源会议两列；影响范围必须填写所属部门或项目名称，不要写泛化影响描述。仅包含2.1和2.2中已列出的风险，不得新增。');
   parts.push('| 风险项 | 等级 | 影响范围 |');
@@ -2621,20 +2633,16 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('先写一句概述，然后：');
   parts.push('## 3.1 近期节点（本月内）');
   parts.push('仅从上面"时间节点"章节中提取，不得编造不存在的时间节点。');
-  parts.push('输出markdown表格，5列：时间节点、责任方、关键事项、量化指标、来源会议；没有量化指标时写"待明确"。');
-  parts.push('⚠️ 责任方必须是数据中的团队名称（即上面各"# 团队名"标题），不得填写会议内容中提到的内部小组或个人名（如"引擎组""测试团队"等）。');
-  parts.push('⚠️ 来源会议格式规则：');
-  parts.push('  - 单source团队：团队名-会议记录文件名，例如：SEED-20260507-项目周会-会议记录');
-  if (msNames.length > 0) {
-    parts.push(`  - 多source团队（${msNames.join('、')}）：团队名-label-会议记录文件名，例如：经典剑侠系列-大部门-20260512-经典剑侠项目周例会`);
-  }
+  parts.push('输出markdown表格，4列：节点、时间、负责人/部门、状态。');
+  parts.push('⚠️ 负责人/部门必须是数据中的团队名称（即上面各"# 团队名"标题），不得填写会议内容中提到的内部小组或个人名（如"引擎组""测试团队"等）。');
+  parts.push('⚠️ 状态从以下选择：冲刺中、筹备中、开发中、制作中、推进中、已过审、已执行、加急中。');
   parts.push('例如：');
-  parts.push('| 时间节点 | 责任方 | 关键事项 | 量化指标 | 来源会议 |');
-  parts.push('|----------|--------|----------|----------|----------|');
+  parts.push('| 节点 | 时间 | 负责人/部门 | 状态 |');
+  parts.push('|------|------|-------------|------|');
   if (msNames.length > 0) {
-    parts.push('| 05-26 | 经典剑侠系列 | 完成新粒子系统适配 | 待明确 | 经典剑侠系列-大部门-20260512-经典剑侠项目周例会 |');
+    parts.push('| 完成新粒子系统适配 | 05-26 | 经典剑侠系列 | 开发中 |');
   }
-  parts.push('| 05-14 | 音频中心 | 跟进需求管理 | 待明确 | 音频中心-20260506-音频中心周会-会议记录 |');
+  parts.push('| 跟进需求管理 | 05-14 | 音频中心 | 推进中 |');
   parts.push('没有则写"本月内暂无明确时间节点。"');
   parts.push('## 3.2 中期节点（未来两个月）');
   parts.push('同上格式和规则的markdown表格，仅从数据中已识别的中期节点提取');
@@ -2645,7 +2653,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('对每个团队写一个小节：');
   parts.push('## 团队名');
   parts.push('### 会议统计');
-  parts.push('用简短表格或一句话总结会议数量、核心议题数、关键决议数和重要会议数，语气保持外发报告风格。');
+  parts.push('用一句话总结会议数量、核心议题数、关键决议数和重要会议数，语气保持外发报告风格。');
   parts.push('### 核心议题');
   parts.push(`仅从该团队的"核心议题"数据中概括，3-8条（•列表），每条用一句话概括原文结论，不输出来源尾注。`);
   if (msNames.length > 0) {
@@ -2659,7 +2667,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('');
   parts.push('');
   parts.push('⚠️ 来源标注规则（所有章节统一执行）：');
-  parts.push('- 正文段落与普通 bullet 不写来源尾注；只在风险矩阵、节点表和附录的"来源会议"列中保留来源。');
+  parts.push('- 正文段落与普通 bullet 不写来源尾注；只在风险矩阵和附录的"来源会议"列中保留来源。');
   parts.push('- 单source团队表格来源格式：团队名-会议记录文件名，例如：SEED-20260507-项目周会-会议记录');
   if (msNames.length > 0) {
     parts.push(`- 多source团队（${msNames.join('、')}）表格来源格式：团队名-label-会议记录文件名，例如：经典剑侠系列-大部门-20260512-经典剑侠项目周例会`);
@@ -2681,7 +2689,6 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('• **推进一般**：团队名（同上，必须有数据支撑）');
   parts.push('• **待加强**：团队名（同上，必须有数据支撑）');
   parts.push('（某个分级如果数据中找不到支撑依据则省略该分级，不要强凑）');
-  parts.push('**建议**：1-2条编号建议，每条一句话，具体可执行。');
   parts.push('');
   parts.push('【再次强调 — 反幻觉检查清单（输出前逐条自检）】');
   parts.push('1. 报告中每一条事实陈述，是否都能在上面的数据中找到对应原文？找不到则删除。');
@@ -2844,7 +2851,7 @@ function parseMarkdownTable(lines, startIdx) {
         const val = row[ci] || '';
         const w = ci === colCount - 1 ? lastColWidth : colWidth;
         if (riskLevelColors[val]) {
-          return cCell(val, w, { bold: true, color: riskLevelColors[val] });
+          return cCell(val, w, { color: riskLevelColors[val] });
         }
         return cCell(val, w);
       })
@@ -2881,14 +2888,14 @@ function parseReportMarkdown(markdown) {
     } else if (/^#\s+/.test(trimmed) && !/^##/.test(trimmed)) {
       if (!isFirstH1) elements.push(pb());
       isFirstH1 = false;
-      elements.push(h1(trimmed.replace(/^#\s+/, '')));
-      lastType = 'h1';
-    } else if (/^###\s+/.test(trimmed)) {
-      elements.push(h3(trimmed.replace(/^###\s+/, '')));
-      lastType = 'h3';
-    } else if (/^##\s+/.test(trimmed)) {
-      elements.push(h2(trimmed.replace(/^##\s+/, '')));
+      elements.push(h2(trimmed.replace(/^#\s+/, '')));
       lastType = 'h2';
+    } else if (/^###\s+/.test(trimmed)) {
+      elements.push(p(trimmed.replace(/^###\s+/, ''), { bold: true }));
+      lastType = 'bold-p';
+    } else if (/^##\s+/.test(trimmed)) {
+      elements.push(h3(trimmed.replace(/^##\s+/, '')));
+      lastType = 'h3';
     } else if (/^\*\*建议[：:]?\*\*/.test(trimmed) || /^建议[：:]/.test(trimmed)) {
       const text = stripInlineSourceRefs(trimmed.replace(/^\*\*建议[：:]?\*\*[：:\s]*/, '').replace(/^建议[：:\s]*/, ''));
       if (text) {
@@ -3075,7 +3082,7 @@ module.exports = {
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
   docStyles, docNumbering, resolveWorkspaceDir, ensureOutputDir, outputPath, findInputFile, readInputJson, writeOutputJson,
   getBaselineFileName, createMeetingBaseline, writeMeetingBaseline, readMeetingBaseline,
-  currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, extractDateFromContent, extractMeetingDate, dateInRange, getWeekKey,
+  currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, extractDateFromContent, extractMeetingDate, meetingDateInRange, dateInRange, getWeekKey,
   listFolder, scanFolder, scanFolderWithStats, scanFolderAll, scanFolderFromDate,
   listFolderAsync, searchFilesAsync: searchFilesAsyncRateLimited, dateToUnixSeconds,
   scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,

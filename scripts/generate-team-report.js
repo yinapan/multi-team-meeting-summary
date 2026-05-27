@@ -7,7 +7,7 @@ const {
   callLLM, buildTeamReportPrompt, parseReportMarkdown,
   formatSourceRef, withSourceRef, normalizeMultiSourceBulletPrefixes,
   formatGenerationMode, printAiReviewWarning,
-  docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, readInputJson, writeOutputJson, normalizeDate, formatDateChinese, dateInRange,
+  docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, readInputJson, writeOutputJson, normalizeDate, formatDateChinese, dateInRange, meetingDateInRange,
   isMultiSourceTeam, groupByLabel,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, PageNumber, PageBreak
@@ -375,12 +375,14 @@ async function main() {
       const documents = [];
       for (const wData of Object.values(teamEntry.weeks)) {
         for (const m of wData.meetings) {
-          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important, rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null });
+          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important, rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null, meetingDate: m.meetingDate || null });
         }
       }
       data = { team: teamName, documents };
     }
-    data.documents = data.documents.filter(d => dateInRange(d.name, startDate, endDate));
+    data.documents = data.documents.filter(d =>
+      d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '')
+    );
     if (data.documents.length === 0) {
       console.log(`跳过 ${teamName}：日期范围内无文档`);
       reportGenerationStats.push({ team: teamName, mode: 'skipped', reason: 'no documents in date range', documents: 0 });

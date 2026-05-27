@@ -1,10 +1,10 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamScanEntries, scanFilesByMode, dedupeKdocsFiles, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, meetingDateInRange, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamScanEntries, scanFilesByMode, dedupeKdocsFiles, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
-async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
+async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl) {
   const cacheFile = path.join(teamDocsCacheDir(teamName), `${fileId}.json`);
   const cached = readCache(cacheFile);
   if (cached && cached.mtime === mtime) {
@@ -75,7 +75,7 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
         const content = (result && result.data && result.data.data && result.data.data.markdown) || '';
         if (content) {
           if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
-          writeCache(cacheFile, { content, mtime, fetched_at: Date.now() });
+          writeCache(cacheFile, { content, mtime, url: fileUrl || '', fetched_at: Date.now() });
         }
         resolve(content);
       } catch (e) {
@@ -106,10 +106,10 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
   });
 }
 
-async function readDocAsync(driveId, fileId, mtime, teamName, pacer) {
+async function readDocAsync(driveId, fileId, mtime, teamName, pacer, fileUrl) {
   const maxAttempts = Number(getKdocsConfig().documentReadRetries) || 3;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const content = await readDocOnceAsync(driveId, fileId, mtime, teamName, pacer);
+    const content = await readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl);
     if (content || attempt === maxAttempts - 1) return content;
     if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
     const delay = Math.min(3000 * Math.pow(2, attempt), 15000) + Math.floor(Math.random() * 500);
@@ -257,7 +257,7 @@ async function main() {
         if (pacer && typeof pacer.noteApiFetch === 'function') pacer.noteApiFetch();
       }
 
-      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer).then(md => {
+      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer, f.link || '').then(md => {
         f._readContent = md || '';
         if (!md) {
           failedDocuments.push({
@@ -275,6 +275,7 @@ async function main() {
         if (warmCacheOnly) return null;
         const teamPeople = teamCfg.leader ? [...importantPeople, teamCfg.leader] : importantPeople;
         const info = extractInfo(md, f.name, teamPeople);
+        info.meetingDate = extractMeetingDate(f.name, md) || null;
         info.id = f.id;
         info.drive_id = f.drive_id;
         info.url = f.link;
@@ -327,7 +328,7 @@ async function main() {
   const teamSummaries = allTeamsData.map(td => {
     const weeks = {};
     for (const doc of td.documents) {
-      const weekKey = getWeekKey(doc.name);
+      const weekKey = getWeekKey(doc.name, '', doc.meetingDate);
       if (!weeks[weekKey]) weeks[weekKey] = { meetings: [], allConclusions: [], allTodos: [] };
       weeks[weekKey].meetings.push({
         title: doc.name.replace(/\.(otl|docx)$/i, ''),
@@ -338,7 +339,8 @@ async function main() {
         todos: doc.todos,
         important: doc.important,
         rawContent: doc.rawContent || '',
-        sourceLabel: doc.sourceLabel || null
+        sourceLabel: doc.sourceLabel || null,
+        meetingDate: doc.meetingDate || null
       });
       weeks[weekKey].allConclusions.push(...doc.conclusions);
       weeks[weekKey].allTodos.push(...doc.todos);

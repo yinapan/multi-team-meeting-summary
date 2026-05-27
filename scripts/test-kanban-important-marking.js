@@ -503,8 +503,8 @@ assert.strictEqual(
   'current doc cache should mark historical kanban meetings with team leader participation'
 );
 
-const titleOnlyImportantMap = new Map();
-applyImportantRecordsToMap(titleOnlyImportantMap, [
+const strictImportantMap = new Map();
+applyImportantRecordsToMap(strictImportantMap, [
   {
     team: cachedTeam,
     title: 'NPC资源需求与优化方案讨论',
@@ -512,9 +512,37 @@ applyImportantRecordsToMap(titleOnlyImportantMap, [
   }
 ], redPeople, { [cachedTeam]: 'TeamLeader' }, true);
 assert.strictEqual(
-  isImportantMeeting('https://www.kdocs.cn/l/cache-url', '20260429 - NPC资源需求与优化方案讨论', titleOnlyImportantMap),
+  isImportantMeeting('https://www.kdocs.cn/l/cache-url', '20260429 - NPC资源需求与优化方案讨论', strictImportantMap),
+  false,
+  'important markers must not be generalized from stripped titles to different dated meetings'
+);
+
+applyImportantRecordsToMap(strictImportantMap, [
+  {
+    team: cachedTeam,
+    title: '20260429 - NPC资源需求与优化方案讨论',
+    url: 'https://www.kdocs.cn/l/cache-url',
+    content: '参会人员：TeamLeader、张三、李四'
+  }
+], redPeople, { [cachedTeam]: 'TeamLeader' }, true);
+assert.strictEqual(
+  isImportantMeeting('https://www.kdocs.cn/l/cache-url', '20260429 - NPC资源需求与优化方案讨论', strictImportantMap),
   'orange',
-  'cached title-only important markers should match kanban titles with date prefixes and urls'
+  'important markers should apply when the same meeting is matched by url or full title'
+);
+
+applyImportantRecordsToMap(strictImportantMap, [
+  {
+    team: '质量中心',
+    title: '20260430 - AI组周例会',
+    url: 'https://www.kdocs.cn/l/important-ai-weekly',
+    content: '参会人员：李爱华、张三'
+  }
+], redPeople, { 质量中心: '李爱华' }, true);
+assert.strictEqual(
+  isImportantMeeting('https://www.kdocs.cn/l/cfNsYtmh8F77', '20260515 - AI组周例会', strictImportantMap),
+  false,
+  'recurring weekly meetings must be marked only from their own participant list, not from another dated meeting'
 );
 fs.rmSync(path.join(__dirname, '..', 'cache', cachedTeam), { recursive: true, force: true });
 

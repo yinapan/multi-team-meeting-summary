@@ -7,7 +7,7 @@ const {
   generateStrategicAnalysis, callLLM, buildComprehensiveReportPrompt, parseReportMarkdown,
   formatSourceRef, withSourceRef, normalizeMultiSourceBulletPrefixes,
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
-  docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, writeOutputJson, normalizeDate, formatDateChinese, dateInRange,
+  docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, writeOutputJson, normalizeDate, formatDateChinese, dateInRange, meetingDateInRange,
   extractMeetingDate, readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   printAiReviewWarning,
   isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
@@ -46,30 +46,6 @@ function stripDocExt(name) {
   return String(name || '').replace(/\.(otl|docx?|pdf|xlsx?|pptx?)$/i, '');
 }
 
-function formatMeetingDate(doc) {
-  const d = extractMeetingDate(doc.name || doc.title || '', doc.rawContent || '');
-  return d ? `${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}` : '未识别';
-}
-
-function buildAppendixMeetingRows(teamDataList) {
-  const rows = [];
-  for (const td of sortTeamsByDocumentCount(teamDataList)) {
-    for (const doc of td.data.documents || []) {
-      const title = stripDocExt(doc.name || doc.title || '');
-      rows.push({
-        team: td.teamName,
-        date: formatMeetingDate(doc),
-        type: classifyMeetingType(title),
-        title
-      });
-    }
-  }
-  return rows.sort((a, b) =>
-    a.team.localeCompare(b.team, 'zh-Hans-CN') ||
-    a.date.localeCompare(b.date) ||
-    a.title.localeCompare(b.title, 'zh-Hans-CN')
-  );
-}
 
 // ========== 跨团队风险去重 ==========
 function dedupRisks(risks) {
@@ -160,9 +136,9 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   }
 
   // 二、风险点分析
-  elements.push(pb(), h1("二、风险点分析"));
+  elements.push(pb(), h2("二、风险点分析"));
   elements.push(p("基于本期会议记录的综合分析，识别出以下需要重点关注的风险点："));
-  elements.push(h2("2.1 高风险事项"));
+  elements.push(h3("2.1 高风险事项"));
   if (allHighRisks.length > 0) {
     allHighRisks.slice(0, 10).forEach(r => {
       const prefix = r.label ? `${r.team}-${r.label}` : r.team;
@@ -171,7 +147,7 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   } else {
     elements.push(p("本期会议记录中未发现高风险事项。", { color: C.gray }));
   }
-  elements.push(h2("2.2 中风险事项"));
+  elements.push(h3("2.2 中风险事项"));
   if (allMidRisks.length > 0) {
     allMidRisks.slice(0, 10).forEach(r => {
       const prefix = r.label ? `${r.team}-${r.label}` : r.team;
@@ -180,19 +156,19 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   } else {
     elements.push(p("本期会议记录中未发现中风险事项。", { color: C.gray }));
   }
-  elements.push(h2("2.3 风险矩阵"));
+  elements.push(h3("2.3 风险矩阵"));
   const allRisksForMatrix = makeRiskMatrixRows(allHighRisks, allMidRisks);
   if (allRisksForMatrix.length > 0) {
     elements.push(new Table({ columnWidths: [3500, 1800, 3726], rows: [
       new TableRow({ tableHeader: true, children: [hCell("风险项", 3500), hCell("等级", 1800), hCell("影响范围", 3726)] }),
-      ...allRisksForMatrix.map(r => new TableRow({ children: [cCell(r.text, 3500), cCell(r.level, 1800, { bold: true, color: r.level === '高' ? C.red : C.orange }), cCell(r.scope, 3726)] }))
+      ...allRisksForMatrix.map(r => new TableRow({ children: [cCell(r.text, 3500), cCell(r.level, 1800, { color: r.level === '高' ? C.red : C.orange }), cCell(r.scope, 3726)] }))
     ]}));
   }
 
   // 三、重点关注节点
-  elements.push(pb(), h1("三、重点关注节点"));
+  elements.push(pb(), h2("三、重点关注节点"));
   elements.push(p("根据会议记录中的决议事项，以下节点需要重点关注与跟进："));
-  elements.push(h2("3.1 近期节点（本月内）"));
+  elements.push(h3("3.1 近期节点（本月内）"));
   const allNear = [];
   teamDataList.forEach(td => {
     if (td.labelAnalyses) {
@@ -215,7 +191,7 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   } else {
     elements.push(p("本月内暂无明确时间节点。", { color: C.gray }));
   }
-  elements.push(h2("3.2 中期节点（未来两个月）"));
+  elements.push(h3("3.2 中期节点（未来两个月）"));
   const allMidNodes = [];
   teamDataList.forEach(td => {
     if (td.labelAnalyses) {
@@ -238,7 +214,7 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   } else {
     elements.push(p("未来两个月暂无明确时间节点。", { color: C.gray }));
   }
-  elements.push(h2("3.3 持续跟进事项"));
+  elements.push(h3("3.3 持续跟进事项"));
   const nodeTexts = [...allNear, ...allMidNodes].map(n => n.text);
   const followItems = [];
   teamDataList.forEach(td => {
@@ -262,7 +238,7 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
 
 function buildFallbackSection4(teamDataList, reportLimits = getReportLimits()) {
   const elements = [];
-  elements.push(pb(), h1("四、各团队会议汇总"));
+  elements.push(pb(), h2("四、各团队会议汇总"));
   elements.push(p("本章节按团队进行划分，详细列出各模块的会议统计、核心议题与关键决议。"));
   teamDataList.forEach(td => {
     elements.push(h2(td.teamName));
@@ -289,7 +265,7 @@ function buildFallbackSection4(teamDataList, reportLimits = getReportLimits()) {
 
 function buildFallbackSection5(teamDataList, grandTotalDocs) {
   const elements = [];
-  elements.push(pb(), h1("五、综合评估与建议"));
+  elements.push(pb(), h2("五、综合评估与建议"));
 
   const analyses = teamDataList.flatMap(td =>
     td.labelAnalyses ? [...td.labelAnalyses.values()] : [td.analysis]
@@ -301,7 +277,7 @@ function buildFallbackSection5(teamDataList, grandTotalDocs) {
   const totalTodos = analyses.reduce((sum, a) => sum + (a.totalTodos || 0), 0);
   const totalConclusions = analyses.reduce((sum, a) => sum + (a.totalConclusions || 0), 0);
 
-  elements.push(h2("5.1 高度概况"));
+  elements.push(h3("5.1 高度概况"));
   const riskPart = totalHighRisks + totalMidRisks > 0
     ? `识别高风险${totalHighRisks}项、中风险${totalMidRisks}项，`
     : '未识别明显高、中风险事项，';
@@ -310,7 +286,7 @@ function buildFallbackSection5(teamDataList, grandTotalDocs) {
     : '后续重点在于保持待办闭环。';
   elements.push(p(`本期共纳入${grandTotalDocs}份会议记录，覆盖${teamDataList.length}个团队，${riskPart}${nodePart}`));
 
-  elements.push(h2("5.2 建议"));
+  elements.push(h3("5.2 建议"));
   const suggestions = [];
   if (totalHighRisks > 0) {
     suggestions.push('高风险事项应逐项明确责任人、截止时间和验收标准，优先完成闭环。');
@@ -377,12 +353,14 @@ async function main() {
       const documents = [];
       for (const wData of Object.values(teamEntry.weeks)) {
         for (const m of wData.meetings) {
-          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important, rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null });
+          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important, rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null, meetingDate: m.meetingDate || null });
         }
       }
       data = { team: team.name, documents };
     }
-    data.documents = data.documents.filter(d => dateInRange(d.name, startDate, endDate));
+    data.documents = data.documents.filter(d =>
+      d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '')
+    );
     if (data.documents.length === 0) { console.log(`跳过 ${team.name}：日期范围内无文档`); continue; }
     const analysis = analyzeDocs(data.documents, team.name, { startDate, endDate });
 
@@ -434,12 +412,10 @@ async function main() {
     successfulReadCount: grandTotalDocs,
     analyzedDocumentCount: grandTotalDocs
   });
-  const unreadableMeetings = (baseline && Array.isArray(baseline.unreadableMeetings)) ? baseline.unreadableMeetings : [];
-  const excludedMeetings = (baseline && Array.isArray(baseline.excludedMeetings)) ? baseline.excludedMeetings : [];
 
   const teamCount = teamDataList.length;
   const appendixTeamRows = sortTeamsByDocumentCount(teamDataList);
-  const appendixMeetingRows = buildAppendixMeetingRows(teamDataList);
+
   const inclusionRate = reportCounts.meetingListCount > 0 ? Math.round((reportCounts.analyzedDocumentCount / reportCounts.meetingListCount) * 100) : 100;
   const now = new Date();
   const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
@@ -524,9 +500,8 @@ async function main() {
   const dateLabel = `${now.getFullYear()}年${formatDateChinese(startDate)} - ${formatDateChinese(endDate)}`;
   const coverSection = makeCoverPage({
     title1: '会议记录', title2: '汇总分析报告',
-    subtitle: '（综合版）',
     dateRange: dateLabel,
-    stats: [`Meeting list ${reportCounts.meetingListCount}`, `Analyzed ${reportCounts.analyzedDocumentCount}`, `Teams ${teamCount}`],
+    stats: [`共收录 ${reportCounts.analyzedDocumentCount} 份会议记录`, `覆盖 ${teamCount} 个团队`],
     editDate: dateStr
   });
 
@@ -540,56 +515,41 @@ async function main() {
         headers: { default: makeHeader(`${config.org_name ? config.org_name + ' ' : ''}会议记录汇总分析报告`, dateLabel) },
         footers: { default: makeFooter() },
         children: [
-          h1("一、执行摘要"),
-          h2("1.1 核心发现"),
+          h2("一、执行摘要"),
+          h3("1.0 生成说明与复核提醒"),
+          p(`生成方式：${llmUsed ? '已使用 LLM 生成分析内容' : '未使用 LLM，使用规则回退生成'}；数据来源：${dataSourceLabel}。`, { color: C.red }),
+          p("⚠️ 本报告为 AI 生成产物，可能存在遗漏、误读、归因错误或表格统计偏差；关键事实、风险等级、时间节点和责任归属请务必结合原始会议记录人工审核。", { color: C.red }),
+          ...(dataSourceMode === 'cache-rebuild' ? [
+            p("⚠️ 本次生成过程中检测到 KDocs 限流，报告使用本地缓存数据重建；限流解除后需要重新跑数据以刷新最新内容。", { color: C.red })
+          ] : []),
+          new Paragraph({ spacing: { before: 200 }, children: [] }),
+          p(`本报告涵盖${teamDataList.map(t => t.teamName).join('、')}共${teamCount}个团队；会议清单共${reportCounts.meetingListCount}条，成功读取${reportCounts.successfulReadCount}份，纳入分析${reportCounts.analyzedDocumentCount}份。所有内容均基于实际会议记录文档提取，团队分类严格按配置映射关系归类。`),
+          new Paragraph({ spacing: { before: 200 }, children: [] }),
+          h3("1.1 核心发现"),
           new Table({ columnWidths: [3000, 6026], rows: [
             new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 6026)] }),
-            new TableRow({ children: [cCell("会议清单数", 3000), cCell(`${reportCounts.meetingListCount}条`, 6026)] }),
-            new TableRow({ children: [cCell("成功读取数", 3000), cCell(`${reportCounts.successfulReadCount}份`, 6026)] }),
-            new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 6026)] }),
+            new TableRow({ children: [cCell("会议记录总数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 6026)] }),
             new TableRow({ children: [cCell("覆盖团队数", 3000), cCell(`${teamCount}个`, 6026)] }),
             new TableRow({ children: [cCell("时间跨度", 3000), cCell(`${now.getFullYear()}.${startDate} - ${endDate}`, 6026)] }),
             new TableRow({ children: [cCell("核心议题数量", 3000), cCell(`${grandTotalConclusions}`, 6026)] }),
             new TableRow({ children: [cCell("关键决议数量", 3000), cCell(`${grandTotalTodos}`, 6026)] })
           ]}),
-          new Paragraph({ spacing: { before: 200 }, children: [] }),
-          h2("1.0 生成说明与复核提醒"),
-          p(`生成方式：${llmUsed ? '已使用 LLM 生成分析内容' : '未使用 LLM，使用规则回退生成'}；数据来源：${dataSourceLabel}。`),
-          p("⚠️ 本报告为 AI 生成产物，可能存在遗漏、误读、归因错误或表格统计偏差；关键事实、风险等级、时间节点和责任归属请务必结合原始会议记录人工审核。"),
-          ...(dataSourceMode === 'cache-rebuild' ? [
-            p("⚠️ 本次生成过程中检测到 KDocs 限流，报告使用本地缓存数据重建；限流解除后需要重新跑数据以刷新最新内容。")
-          ] : []),
-          new Paragraph({ spacing: { before: 200 }, children: [] }),
-          p(`本报告涵盖${teamDataList.map(t => t.teamName).join('、')}共${teamCount}个团队；会议清单共${reportCounts.meetingListCount}条，成功读取${reportCounts.successfulReadCount}份，纳入分析${reportCounts.analyzedDocumentCount}份。所有内容均基于实际会议记录文档提取，团队分类严格按配置映射关系归类。`),
 
           ...analyticalElements,
 
           pb(),
-          h1("六、附录：会议清单与文档纳入率"),
-          h2("团队汇总"),
-          new Table({ columnWidths: [2200, 2400, 1200, 1200, 2026], rows: [
-            new TableRow({ tableHeader: true, children: [hCell("团队", 2200), hCell("主要会议类型", 2400), hCell("文档数", 1200), hCell("结论数", 1200), hCell("待办数", 2026)] }),
+          h2("六、附录：会议清单与文档纳入率"),
+          h3("团队汇总"),
+          new Table({ columnWidths: [2500, 4300, 2226], rows: [
+            new TableRow({ tableHeader: true, children: [hCell("团队", 2500), hCell("主要会议类型", 4300), hCell("文档数", 2226)] }),
             ...appendixTeamRows.map(td => new TableRow({ children: [
-              cCell(td.teamName, 2200),
-              cCell(summarizePrimaryMeetingTypes(td.data.documents, 5), 2400),
-              cCell(`${td.data.documents.length}份`, 1200),
-              cCell(`${td.analysis.totalConclusions}`, 1200),
-              cCell(`${td.analysis.totalTodos}`, 2026)
+              cCell(td.teamName, 2500),
+              cCell(summarizePrimaryMeetingTypes(td.data.documents, 5), 4300),
+              cCell(`${td.data.documents.length}份`, 2226)
             ]}))
           ]}),
           new Paragraph({ spacing: { before: 300 }, children: [] }),
-          h2("会议清单明细"),
-          new Table({ columnWidths: [1700, 1100, 1700, 4526], rows: [
-            new TableRow({ tableHeader: true, children: [hCell("团队", 1700), hCell("日期", 1100), hCell("会议类型", 1700), hCell("会议标题", 4526)] }),
-            ...appendixMeetingRows.map(row => new TableRow({ children: [
-              cCell(row.team, 1700),
-              cCell(row.date, 1100),
-              cCell(row.type, 1700),
-              cCell(row.title.substring(0, 80), 4526)
-            ]}))
-          ]}),
-          new Paragraph({ spacing: { before: 300 }, children: [] }),
-          h2("纳入率统计"),
+          h3("纳入率统计"),
           new Table({ columnWidths: [3000, 3013, 3013], rows: [
             new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 3013), hCell("说明", 3013)] }),
             new TableRow({ children: [cCell("会议清单数", 3000), cCell(`${reportCounts.meetingListCount}条`, 3013, { bold: true }), cCell("统一数据基线中的会议条目", 3013)] }),
@@ -597,11 +557,6 @@ async function main() {
             new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 3013, { bold: true }), cCell("进入正文分析与附录统计的文档", 3013)] }),
             new TableRow({ children: [cCell("文档纳入率", 3000), cCell(`${inclusionRate}%`, 3013, { bold: true }), cCell(`${reportCounts.analyzedDocumentCount}/${reportCounts.meetingListCount}`, 3013)] })
           ]}),
-          ...(unreadableMeetings.length || excludedMeetings.length ? [
-            new Paragraph({ spacing: { before: 260 }, children: [] }),
-            h2("未纳入项说明"),
-            p(`本期有${unreadableMeetings.length}条会议清单项读取失败，${excludedMeetings.length}条文档在正文日期校验后未纳入分析。`)
-          ] : []),
           new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "— 报告完 —", color: C.gray, size: 20, font: FONT })] })
         ]
       }
@@ -609,13 +564,14 @@ async function main() {
   });
 
   const buffer = await Packer.toBuffer(doc);
-  const outFile = outputPath(`综合分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
+  const reportPrefix = config.org_name ? `${config.org_name}会议记录汇总分析报告` : '综合分析报告';
+  const outFile = outputPath(`${reportPrefix}-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
   try {
     fs.writeFileSync(outFile, buffer);
   } catch (e) {
     if (e.code === 'EBUSY') {
       const ts = new Date().toISOString().replace(/[T:]/g, '-').substring(0, 16);
-      const altFile = outputPath(`综合分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
+      const altFile = outputPath(`${reportPrefix}-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
       fs.writeFileSync(altFile, buffer);
       console.log(`原文件被占用，已另存为: ${path.basename(altFile)}`);
       console.log(`综合报告已生成: ${(buffer.length / 1024).toFixed(1)}KB -> ${path.basename(altFile)}`);
