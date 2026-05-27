@@ -1216,7 +1216,7 @@ async function fullScan(config, importantMap) {
     return { name: teamCfg.name, weeks: weekMap };
   }));
 
-  return { teams: teamResults, lastUpdate: new Date().toISOString().slice(0, 10) };
+  return { data: { teams: teamResults, lastUpdate: new Date().toISOString().slice(0, 10) }, pacer };
 }
 
 // ========== 增量扫描（默认递归扫描，避免 search-files 漏掉嵌套目录） ==========
@@ -1311,7 +1311,7 @@ async function incrementalScan(config, existingData, importantMap) {
 
   console.log(`新增 ${newCount} 条会议记录`);
   existingData.lastUpdate = new Date().toISOString().slice(0, 10);
-  return existingData;
+  return { data: existingData, pacer };
 }
 
 // ========== 入口 ==========
@@ -1326,6 +1326,7 @@ async function main() {
   const htmlFilePath = outputPath(HTML_FILE);
 
   let kanbanData;
+  let scanPacer = null;
   let config = null;
   let importantMap = new Map();
   let importantPeople = [];
@@ -1364,7 +1365,9 @@ async function main() {
     const scanMode = determineScanMode(args, fs.existsSync(dataFilePath));
     if (scanMode === 'full') {
       console.log(refresh ? '强制全量扫描...' : '执行全量扫描，确保看板数据完整...');
-      const scannedData = await fullScan(config, importantMap);
+      const fullResult = await fullScan(config, importantMap);
+      const scannedData = fullResult.data || fullResult;
+      scanPacer = fullResult.pacer || null;
       if (fs.existsSync(dataFilePath)) {
         const existing = JSON.parse(fs.readFileSync(dataFilePath, 'utf-8'));
         const reconciled = reconcileWithExistingKanban(scannedData, existing);
@@ -1382,18 +1385,25 @@ async function main() {
     } else {
       const existing = JSON.parse(fs.readFileSync(dataFilePath, 'utf-8'));
       console.log(`已有看板数据 (更新于 ${existing.lastUpdate})，执行默认增量补新...`);
-      kanbanData = await incrementalScan(config, existing, importantMap);
+      const incrementalResult = await incrementalScan(config, existing, importantMap);
+      kanbanData = incrementalResult.data || incrementalResult;
+      scanPacer = incrementalResult.pacer || null;
     }
     console.log(`扫描完成，耗时 ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-    const refreshStats = await refreshChangedImportantRecords(config, importantPeople, teamLeaders, importantMap);
-    if (refreshStats.changed > 0) {
-      console.log(`重要标记依赖正文刷新: 检测 ${refreshStats.changed} 篇变更，刷新 ${refreshStats.refreshed} 篇`);
-    }
-    if (refreshStats.missing > 0) {
-      console.log(`重要标记缺失正文补拉: 检测 ${refreshStats.missing} 篇缺缓存，成功 ${refreshStats.refreshed} 篇`);
-    }
-    if (refreshStats.cachedApplied > 0) {
-      console.log(`重要标记本地缓存补全: ${refreshStats.cachedApplied} 篇`);
+    const scanStats = scanPacer && typeof scanPacer.getStats === 'function' ? scanPacer.getStats() : {};
+    if (scanStats.cacheRebuildUsed) {
+      console.log('⚠️ 检测到 KDocs 限流，跳过重要标记在线刷新，改用本地缓存补全。');
+    } else {
+      const refreshStats = await refreshChangedImportantRecords(config, importantPeople, teamLeaders, importantMap);
+      if (refreshStats.changed > 0) {
+        console.log(`重要标记依赖正文刷新: 检测 ${refreshStats.changed} 篇变更，刷新 ${refreshStats.refreshed} 篇`);
+      }
+      if (refreshStats.missing > 0) {
+        console.log(`重要标记缺失正文补拉: 检测 ${refreshStats.missing} 篇缺缓存，成功 ${refreshStats.refreshed} 篇`);
+      }
+      if (refreshStats.cachedApplied > 0) {
+        console.log(`重要标记本地缓存补全: ${refreshStats.cachedApplied} 篇`);
+      }
     }
     applyImportantMarkersToKanbanData(kanbanData, importantMap);
   }
@@ -1411,9 +1421,32 @@ async function main() {
   fs.writeFileSync(htmlFilePath, html, 'utf-8');
 
   const totalMeetings = countMeetings(kanbanData);
+  const scanStats = scanPacer && typeof scanPacer.getStats === 'function' ? scanPacer.getStats() : {};
+  const dataSourceMode = offline ? 'local-data' : (scanStats.cacheRebuildUsed ? 'cache-rebuild' : 'direct-read');
+  const statsFile = writeOutputJson('kanban-generation-stats.json', {
+    type: 'kanban',
+    generatedAt: new Date().toISOString(),
+    mode: refresh ? 'full' : (offline ? 'offline' : 'incremental'),
+    dataSourceMode,
+    cacheRebuildReason: dataSourceMode === 'cache-rebuild'
+      ? 'KDocs 返回限流，看板使用本地缓存数据重建；限流解除后需要重新跑看板。'
+      : null,
+    teams: kanbanData.teams.length,
+    meetings: totalMeetings,
+    output: {
+      data: path.basename(writtenDataFile),
+      html: path.basename(htmlFilePath)
+    },
+    kdocs: scanStats
+  });
   console.log(`看板数据已保存: ${writtenDataFile}`);
   console.log(`看板已生成: ${(Buffer.byteLength(html) / 1024).toFixed(1)}KB -> ${htmlFilePath}`);
   console.log(`  团队数: ${kanbanData.teams.length}, 会议数: ${totalMeetings}`);
+  console.log(`生成统计: ${statsFile}`);
+  console.log(`数据来源: ${dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : dataSourceMode === 'local-data' ? '本地看板数据' : '直接读取/缓存命中'}`);
+  if (dataSourceMode === 'cache-rebuild') {
+    console.log('⚠️ 本次看板使用缓存数据生成；KDocs 限流解除后需要重新跑看板。');
+  }
 }
 
 if (require.main === module) {

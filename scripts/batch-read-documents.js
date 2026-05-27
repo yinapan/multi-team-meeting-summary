@@ -10,6 +10,15 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer) {
   if (cached && cached.mtime === mtime) {
     return cached.content;
   }
+  if (cached && cached.content && pacer && typeof pacer.shouldPreferCache === 'function' && pacer.shouldPreferCache()) {
+    if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+    if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-document-cache');
+    return cached.content;
+  }
+  if (!cached && pacer && typeof pacer.shouldPreferCache === 'function' && pacer.shouldPreferCache()) {
+    if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-document-cache');
+    return '';
+  }
 
   if (pacer) await pacer.acquire();
   return new Promise((resolve) => {

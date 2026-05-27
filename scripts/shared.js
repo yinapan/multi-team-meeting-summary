@@ -105,6 +105,9 @@ class RequestPacer {
     this.adaptiveMaxIntervalMs = options.adaptiveMaxIntervalMs || Number(cfg.adaptiveMaxIntervalMs) || 3000;
     this.adaptiveStepMs = options.adaptiveStepMs || Number(cfg.adaptiveStepMs) || 500;
     this.recoverySuccesses = options.recoverySuccesses || Number(cfg.recoverySuccesses) || 20;
+    this.useCacheOnRateLimit = options.useCacheOnRateLimit !== undefined
+      ? options.useCacheOnRateLimit
+      : cfg.useCacheOnRateLimit !== false;
     this.successSinceRateLimit = 0;
     this.active = 0;
     this.queue = [];
@@ -126,6 +129,11 @@ class RequestPacer {
   acquire() {
     return new Promise(resolve => {
       const tryRun = () => {
+        if (this.shouldPreferCache()) {
+          this.active++;
+          resolve();
+          return;
+        }
         if (this.active >= this.maxConcurrent) {
           this.queue.push(tryRun);
           return;
@@ -176,6 +184,10 @@ class RequestPacer {
     this.stats.cacheRebuildUsed = true;
     if (!this.stats.cacheRebuildReasons) this.stats.cacheRebuildReasons = {};
     this.stats.cacheRebuildReasons[reason] = (this.stats.cacheRebuildReasons[reason] || 0) + 1;
+  }
+
+  shouldPreferCache() {
+    return this.useCacheOnRateLimit && (!!this.stats.cacheRebuildUsed || this.stats.rateLimits > 0);
   }
 
   noteCacheHit() {
@@ -901,10 +913,14 @@ function shouldUseCacheImmediately(parsedOrCode) {
   return RETRY_CODES.has(code);
 }
 
-async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests') {
+async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests', beforeSpawn = null) {
   if (!pacer) return spawnKdocsCli(args, inputJson, timeout);
   await pacer.acquire();
   try {
+    if (typeof beforeSpawn === 'function') {
+      const skipped = beforeSpawn();
+      if (skipped) return skipped;
+    }
     if (typeof pacer.noteRequest === 'function') pacer.noteRequest(kind);
     return await spawnKdocsCli(args, inputJson, timeout);
   } finally {
@@ -926,7 +942,14 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
       ['drive', 'list-files', '--output', 'json'],
       inputJson,
       15000,
-      'list'
+      'list',
+      () => {
+        if (!pacer || typeof pacer.shouldPreferCache !== 'function' || !pacer.shouldPreferCache()) return null;
+        if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+        if (!cached) return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: [] } } }) };
+        if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+        return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: cached.items } } }) };
+      }
     );
     if (error && !stdout) {
       if (attempt < MAX_RETRIES) {
@@ -945,12 +968,14 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
       if (parsed && parsed.code && parsed.code !== 0) {
         if (shouldUseCacheImmediately(parsed)) {
           if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(0);
+          if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
           if (cached) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-            if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
             process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, using cached folder data\n`);
             return cached.items;
           }
+          process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, no cache available\n`);
+          return [];
         }
         if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
           if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit();
@@ -1176,6 +1201,12 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
   const cacheFile = path.join(teamFoldersCacheDir(teamName), `search_${cacheKey}.json`);
   const cached = readCache(cacheFile);
   if (cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) return cached.items;
+  if (pacer && typeof pacer.shouldPreferCache === 'function' && pacer.shouldPreferCache()) {
+    if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+    if (!cached) return [];
+    if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+    return cached.items;
+  }
 
   const allItems = [];
   let pageToken = null;
@@ -1208,7 +1239,14 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
         ['drive', 'search-files', '--output', 'json'],
         JSON.stringify(inputObj),
         30000,
-        'search'
+        'search',
+        () => {
+          if (!pacer || typeof pacer.shouldPreferCache !== 'function' || !pacer.shouldPreferCache()) return null;
+          if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+          if (!cached) return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: [] } } }) };
+          if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: cached.items } } }) };
+        }
       );
 
         if (error && !stdout) {
@@ -1241,11 +1279,15 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
         lastCode = parsed.code;
         if (RETRY_CODES.has(parsed.code)) {
           if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(shouldUseCacheImmediately(parsed) ? 0 : undefined);
-          if (shouldUseCacheImmediately(parsed) && cached) {
-            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          if (shouldUseCacheImmediately(parsed)) {
             if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
-            process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, using cached search data\n`);
-            return cached.items;
+            if (cached) {
+              if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+              process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, using cached search data\n`);
+              return cached.items;
+            }
+            process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, no cache available\n`);
+            return [];
           }
           if (attempt < MAX_RETRIES) {
             if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();

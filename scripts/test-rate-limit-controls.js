@@ -12,6 +12,7 @@ async function testPacerCoolsDownAfterRateLimit() {
     rateLimitCooldownMs: 25,
     adaptiveMaxIntervalMs: 20,
     adaptiveStepMs: 5,
+    useCacheOnRateLimit: false,
   });
 
   const started = [];
@@ -50,6 +51,22 @@ function testPacerAdaptsAndRecovers() {
   assert.strictEqual(pacer.getCurrentIntervalMs(), 20);
 }
 
+function testPacerPrefersCacheAfterCacheRebuild() {
+  const pacer = new RequestPacer();
+
+  assert.strictEqual(pacer.shouldPreferCache(), false);
+  pacer.noteRateLimit(0);
+  assert.strictEqual(pacer.shouldPreferCache(), true);
+}
+
+function testPacerPrefersCacheAfterCacheRebuildMarker() {
+  const pacer = new RequestPacer();
+
+  assert.strictEqual(pacer.shouldPreferCache(), false);
+  pacer.noteCacheRebuild('rate-limit-folder-cache');
+  assert.strictEqual(pacer.shouldPreferCache(), true);
+}
+
 function testSelectMonthEntriesForRangeSkipsUnrelatedMonths() {
   const sources = [
     {
@@ -78,6 +95,8 @@ function testSelectMonthEntriesForRangeSkipsUnrelatedMonths() {
 async function main() {
   testSelectMonthEntriesForRangeSkipsUnrelatedMonths();
   testPacerAdaptsAndRecovers();
+  testPacerPrefersCacheAfterCacheRebuild();
+  testPacerPrefersCacheAfterCacheRebuildMarker();
   await testPacerCoolsDownAfterRateLimit();
   console.log('rate-limit controls tests passed');
 }
