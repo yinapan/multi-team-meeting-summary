@@ -1,95 +1,97 @@
-# 多团队会议记录汇总分析
+﻿# 多团队会议记录汇总分析工具
 
-从 KDocs 云文档批量读取多个团队的会议记录，自动提取结论/待办/风险，生成结构化 Word 分析报告和可交互 HTML 会议看板。
+从 KDocs 云文档递归扫描会议记录，按日期生成综合会议记录汇总分析报告，并生成会议记录看板。
 
-## 前置依赖
+## 保留的业务入口
 
-- **Node.js** 18+
-- **kdocs-cli** — KDocs MCP CLI 工具（用于读取云文档）
-- **npm 依赖** — 运行 `node scripts/setup.js` 时会自动检查并安装；也可手动执行 `npm install`
-
-## 快速开始
-
-### 1. 初始化配置
+### 1. 根据日期生成综合会议记录汇总分析报告
 
 ```bash
-node scripts/setup.js
+npm run report -- 05-11 05-24
 ```
 
-交互式引导创建 `config.json`，输入团队名称、KDocs 文件夹链接、重要参会人等。
-
-也可以复制 `config.example.json` 手动编辑：
+等价于：
 
 ```bash
-cp config.example.json config.json
+node scripts/generate-report.js 05-11 05-24
 ```
 
-### 2. 批量读取文档
+该入口会完整执行主流程：
+
+1. 递归扫描 `config.json` 中每个团队的 KDocs 根目录。
+2. 按标题日期或正文会议日期过滤到指定日期范围。
+3. 读取会议正文并生成统一数据基线。
+4. 生成团队 LLM 摘要，供综合报告汇总使用。
+5. 生成 `outputs/综合分析报告-<start>-<end>.docx`。
+
+生成结束会输出 AI 产物审核警告、各模块耗时、是否使用 LLM，以及统计文件位置。
+
+### 2. 生成全量会议记录看板
 
 ```bash
-node scripts/batch-read-documents.js <起始日期> <结束日期>
+npm run kanban:full
 ```
 
-示例：`node scripts/batch-read-documents.js 04-01 04-30`
-
-自动扫描所有团队文件夹，5 路并发读取文档内容，提取结论和待办。
-
-### 3. 生成报告
+等价于：
 
 ```bash
-# 单团队报告
-node scripts/generate-team-report.js 04-01 04-30
-
-# 综合分析报告（跨团队视角）
-node scripts/generate-comprehensive-report.js 04-01 04-30
+node scripts/kanban-full.js
 ```
 
-### 4. 生成看板（可选）
+该入口强制递归扫描所有配置团队的 KDocs 根目录，重建：
+
+- `outputs/会议看板-data.json`
+- `outputs/会议看板.html`
+
+### 3. 生成增量会议记录看板
 
 ```bash
-node scripts/generate-kanban.js
+npm run kanban
 ```
 
-生成可交互的 HTML 会议看板（团队 × 周次矩阵视图）。
+等价于：
 
-## 输出目录
-
-脚本生成的 JSON、Markdown、Word 报告和 HTML 看板统一写入 `outputs/` 目录。为兼容旧数据，读取输入数据时会优先查找 `outputs/`，找不到时再回退到项目根目录的历史文件。
-
-## LLM 分析
-
-报告生成支持 LLM 深度分析。OpenClaw 用户无需额外配置，自动检测环境调用 LLM。全部不可用时自动回退到规则分析。
-
-如需手动配置 API，在 `config.json` 中添加：
-
-```json
-{
-  "llm": {
-    "baseUrl": "https://api.example.com/v1",
-    "apiKey": "sk-xxx",
-    "model": "gpt-4o"
-  }
-}
+```bash
+node scripts/kanban-incremental.js
 ```
 
-详细说明见 [SKILL.md](SKILL.md)。
+该入口基于已有看板数据做增量补新。若本地没有看板数据，会自动走全量扫描。
 
-## 文件结构
+## 数据口径
 
+报告和看板共用同一套扫描入口：默认使用团队 `root_folder_id` 递归扫描，再按会议日期过滤。不要再按月份目录分别拼扫描逻辑。
+
+报告基线文件：
+
+```text
+outputs/meeting-baseline-<start>-<end>.json
 ```
-├── config.example.json    # 配置模板
-├── config.json            # 用户配置（.gitignore 排除）
-├── package.json           # 依赖声明
-├── SKILL.md               # 完整文档
-├── outputs/               # 生成物目录（JSON / Markdown / DOCX / HTML）
-└── scripts/
-    ├── setup.js                        # 引导式配置
-    ├── resolve-drive-ids-v2.js         # 解析 link_id → drive_id
-    ├── shared.js                       # 共享模块
-    ├── batch-read-documents.js         # 批量读取文档
-    ├── reconstruct-from-cache.js       # 离线从缓存重建数据
-    ├── generate-team-report.js         # 单团队报告（完成后自动生成看板）
-    ├── generate-comprehensive-report.js # 综合报告
-    ├── generate-kanban.js              # 会议看板
-    └── enrich-meeting-data.js          # URL 补充
+
+基线中区分三类数量：
+
+- `meetingListCount`：日期范围内会议清单数
+- `successfulReadCount`：成功读取正文或结构化内容的文档数
+- `analyzedDocumentCount`：纳入报告分析的文档数
+
+## 输出
+
+主要输出都在 `outputs/`：
+
+- `综合分析报告-*.docx`
+- `会议看板.html`
+- `会议看板-data.json`
+- `main-report-generation-stats.json`
+- `report-generation-stats.json`
+- `comprehensive-report-generation-stats.json`
+
+## 配置
+
+`config.json` 存放 KDocs token、团队根目录和 LLM 配置，已被 `.gitignore` 排除，不能提交。
+
+新增团队或目录时，维护 `config.json` 中的团队 `root_folder_id` 即可。系统默认递归扫描根目录，新增月份或子目录不需要额外写扫描逻辑。
+
+## 验证
+
+```bash
+npm test
 ```

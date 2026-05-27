@@ -542,6 +542,10 @@ async function main() {
     timingSummary: `LLM ${llmCount} 个，规则回退 ${fallbackCount} 个，跳过 ${skippedCount} 个，失败 ${errorCount} 个${elapsedTeams ? `；${elapsedTeams}` : ''}`
   });
 
+  if (args.includes('--no-kanban') || process.env.SKIP_AUTO_KANBAN === '1') {
+    return;
+  }
+
   // 报告全部生成后，自动同步生成看板
   console.log('\n===== 同步生成会议看板 =====');
   try {

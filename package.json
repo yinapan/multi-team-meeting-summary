@@ -1,10 +1,13 @@
 {
   "name": "multi-team-meeting-summary",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "多团队会议记录汇总分析工具",
   "scripts": {
-    "setup": "node scripts/setup.js"
+    "report": "node scripts/generate-report.js",
+    "kanban:full": "node scripts/kanban-full.js",
+    "kanban": "node scripts/kanban-incremental.js",
+    "test": "node scripts/test-baseline-contract.js && node scripts/test-comprehensive-prompt-compression.js && node scripts/test-comprehensive-report-contract.js && node scripts/test-comprehensive-section5-concise.js && node scripts/test-comprehensive-source-stripping.js && node scripts/test-encoding-integrity.js && node scripts/test-hybrid-scan-policy.js && node scripts/test-kanban-important-marking.js && node scripts/test-output-paths.js && node scripts/test-rate-limit-controls.js && node scripts/test-report-source-attribution.js"
   },
   "dependencies": {
     "docx": "^8.0.0"

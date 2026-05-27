@@ -71,7 +71,7 @@ function printAiReviewWarning(context = {}) {
 try {
   require.resolve('docx');
 } catch (_) {
-  throw new Error('缺少 npm 依赖 docx，请先运行 npm install 或 node scripts/setup.js');
+  throw new Error('缺少 npm 依赖 docx，请先运行 npm install');
 }
 
 const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
