@@ -2462,6 +2462,10 @@ async function callLLM(prompt, config = {}) {
 
   // 2. 自动检测 OpenClaw 环境（遍历所有 provider 逐个回退）
   const providers = resolveOpenClawProviders();
+  if (providers.length === 0) {
+    const cfgPath = resolveOpenClawConfigPath();
+    console.log(`[callLLM] OpenClaw 配置查找: ${cfgPath || '未找到 openclaw.json'}（__dirname=${__dirname}, cwd=${process.cwd()}）`);
+  }
   for (const oc of providers) {
     console.log(`[callLLM] 尝试 OpenClaw provider: ${oc.providerName} / ${oc.model} (${oc.baseUrl})`);
     const result = await callLLMApi(oc.baseUrl, oc.apiKey, oc.model, prompt, timeout);
