@@ -407,10 +407,11 @@ async function main() {
     baseline = written.baseline;
     console.log(`meeting-baseline: ${written.file}`);
   }
+  const grandTotalAll = teamDataList.reduce((s, t) => s + (t.data.meetingListCount || t.data.totalScanned || t.data.documents.length), 0);
   const reportCounts = baselineCountsForReport(baseline, {
-    meetingListCount: grandTotalScanned,
+    meetingListCount: grandTotalAll,
     successfulReadCount: grandTotalDocs,
-    analyzedDocumentCount: grandTotalDocs
+    analyzedDocumentCount: grandTotalAll
   });
 
   const teamCount = teamDataList.length;

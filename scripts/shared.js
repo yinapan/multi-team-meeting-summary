@@ -1455,8 +1455,8 @@ function createMeetingBaseline(teamEntries, options = {}) {
       (Array.isArray(doc.conclusions) && doc.conclusions.length > 0) ||
       (Array.isArray(doc.todos) && doc.todos.length > 0)
     ).length;
-    const analyzedDocumentCount = documents.length;
-    const meetingListCount = Number(entry.meetingListCount || entry.totalScanned || meetingListItems.length || analyzedDocumentCount);
+    const meetingListCount = Number(entry.meetingListCount || entry.totalScanned || meetingListItems.length || documents.length);
+    const analyzedDocumentCount = meetingListCount;
     return {
       team,
       meetingListCount,
