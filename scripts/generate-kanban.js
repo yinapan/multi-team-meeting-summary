@@ -936,7 +936,9 @@ function enrichKanbanFromDocCache(kanbanData, cacheData) {
 
 function pruneMeetingsWithoutConcreteDate(kanbanData) {
   const today = new Date();
-  const todayNum = (today.getMonth() + 1) * 100 + today.getDate();
+  const limitDate = new Date(today);
+  limitDate.setDate(today.getDate() + 30);
+  const limitNum = (limitDate.getMonth() + 1) * 100 + limitDate.getDate();
   for (const team of kanbanData?.teams || []) {
     for (const [weekKey, meetings] of Object.entries(team.weeks || {})) {
       team.weeks[weekKey] = (meetings || []).filter(meeting => {
@@ -944,7 +946,7 @@ function pruneMeetingsWithoutConcreteDate(kanbanData) {
         const titleDate = title.match(/^(\d{4})(\d{2})(\d{2})/);
         if (titleDate && Number(titleDate[1]) === currentYear()) {
           const titleNum = Number(titleDate[2]) * 100 + Number(titleDate[3]);
-          if (titleNum > todayNum) return false;
+          if (titleNum > limitNum) return false;
         }
         if (extractMeetingDate(title)) return true;
         if (/^\d{6}(?!\d)/.test(title)) return false;
