@@ -504,6 +504,12 @@ function extractDateFromFileName(fileName) {
     if (date) return date;
   }
 
+  // 兜底：greedy 月份>12时，尝试单数字月日解释，如 "84-20" → 8月4日
+  if (match && parseInt(match[1], 10) > 12) {
+    const date = makeDate(match[1].substring(0, 1), match[1].substring(1));
+    if (date) return date;
+  }
+
   // 匹配无年份的 MMDD 格式（仅当前缀是4位数字且不像年份时）: 0428-xxx
   match = fileName.match(/^(\d{2})(\d{2})\s*[\-—–]/);
   if (match) {
@@ -590,11 +596,19 @@ function extractDateFromContent(markdown) {
   return null;
 }
 
+function isValidMeetingDate(month, day) {
+  const now = new Date();
+  const meetingDate = new Date(currentYear(), month - 1, day);
+  const limit = new Date(now);
+  limit.setDate(now.getDate() + 30);
+  return meetingDate <= limit;
+}
+
 function extractMeetingDate(fileName, markdown = '', mtime = null) {
   const fromFile = extractDateFromFileName(fileName);
-  if (fromFile) return fromFile;
+  if (fromFile && isValidMeetingDate(fromFile.month, fromFile.day)) return fromFile;
   const fromContent = extractDateFromContent(markdown);
-  if (fromContent) return fromContent;
+  if (fromContent && isValidMeetingDate(fromContent.month, fromContent.day)) return fromContent;
   if (mtime) {
     const d = new Date(mtime * 1000);
     if (!isNaN(d.getTime())) return { month: d.getMonth() + 1, day: d.getDate() };
