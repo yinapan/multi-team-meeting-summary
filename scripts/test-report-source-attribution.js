@@ -11,7 +11,7 @@ const {
 const singleDoc = {
   name: '20260507-项目周会-会议记录.otl',
   conclusions: ['资源短缺风险需要重点跟进'],
-  todos: ['05月28日 complete resource coordination'],
+  todos: ['05月30日 complete resource coordination'],
   rawContent: '',
   sourceLabel: null
 };
