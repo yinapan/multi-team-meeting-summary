@@ -29,9 +29,24 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl
         pacer.release();
       }
     };
-    const inputJson = JSON.stringify({ drive_id: driveId, file_id: fileId, format: "markdown", include_elements: "para" });
+    // 解析 read-file (新版) 返回的各种格式
+    function extractContentFromReadFile(parsed) {
+      const data = (parsed && parsed.data && parsed.data.data) || (parsed && parsed.data) || {};
+      const content = data.content;
+      if (!content) return '';
+      if (typeof content === 'string') return content;
+      // ksheet 等结构化格式：提取单元格文本
+      if (content.range_data) {
+        const cells = content.range_data.detail?.rangeData || [];
+        return cells.map(c => c.cellText || c.originalCellValue || '').filter(Boolean).join('\n');
+      }
+      return '';
+    }
+
+    // 先尝试新版 read-file API（兼容更多格式）
+    const inputJson = JSON.stringify({ file_id: fileId });
     if (pacer && typeof pacer.noteRequest === 'function') pacer.noteRequest('read');
-    const child = require('child_process').spawn(getKdocsCliPath(), getKdocsCliArgs(['drive', 'read-file-content', '--output', 'json']), {
+    const child = require('child_process').spawn(getKdocsCliPath(), getKdocsCliArgs(['drive', 'read-file', '--output', 'json']), {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
     });
     let stdout = '';
@@ -44,13 +59,7 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl
       release();
       if (code !== 0 || !stdout) {
         if (stderr) process.stderr.write(`[readDoc] 失败 file=${fileId}: ${stderr.substring(0, 100)}\n`);
-        if (cached && cached.content) {
-          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-          process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
-          resolve(cached.content);
-          return;
-        }
-        resolve('');
+        resolve(cached && cached.content ? cached.content : '');
         return;
       }
       try {
@@ -59,12 +68,11 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl
           if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteRateLimit === 'function') {
             pacer.noteRateLimit(0);
           }
+          if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteCacheRebuild === 'function') {
+            pacer.noteCacheRebuild('rate-limit-document-cache');
+          }
           process.stderr.write(`[readDoc] API error file=${fileId} code=${result.code}\n`);
           if (cached && cached.content) {
-            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-            if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteCacheRebuild === 'function') {
-              pacer.noteCacheRebuild('rate-limit-document-cache');
-            }
             process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
             resolve(cached.content);
             return;
@@ -72,7 +80,7 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl
           resolve('');
           return;
         }
-        const content = (result && result.data && result.data.data && result.data.data.markdown) || '';
+        const content = extractContentFromReadFile(result);
         if (content) {
           if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
           writeCache(cacheFile, { content, mtime, url: fileUrl || '', fetched_at: Date.now() });
