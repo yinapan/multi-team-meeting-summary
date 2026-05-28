@@ -1293,7 +1293,9 @@ async function incrementalScan(config, existingData, importantMap) {
   console.log("增量更新: 回看 " + lookbackDays + " 天，从 " + String(startMonth).padStart(2, "0") + "-" + String(startDay).padStart(2, "0") + " 开始（最新标题日期: " + String(latestDate.month).padStart(2, "0") + "-" + String(latestDate.day).padStart(2, "0") + "）");
 
   const pacer = new RequestPacer();
+  pacer.forceRefresh = true;
   const scanMode = getKdocsScanMode();
+  const fromDate = { month: startMonth, day: startDay };
 
   const existingUrlSet = new Set();
   const existingTitleSet = new Set();
@@ -1323,30 +1325,25 @@ async function incrementalScan(config, existingData, importantMap) {
           teamName: teamCfg.name,
           pacer,
           mode: scanMode,
-          includeAll: true
+          includeAll: true,
+          fromDate
         });
         files = result.files;
       } catch (e) {
         console.log(`  ${teamCfg.name}/${entry.monthName}: ${scanMode} 失败 (${e.message.substring(0, 80)})`);
-        files = await scanFolderAllAsync(entry.source.drive_id, entry.folderId, teamCfg.name, pacer);
+        files = await scanFolderFromDateAsync(entry.source.drive_id, entry.folderId, fromDate.month, fromDate.day, teamCfg.name, pacer);
       }
-      const resolvedFiles = [];
-      for (const f of files) {
-        const resolved = await resolveMeetingDateForFile(teamCfg, f, pacer);
-        if (!resolved.date || (resolved.date.month * 100 + resolved.date.day) < startNum) continue;
-        resolvedFiles.push({ ...f, _resolvedDate: resolved.date, _resolvedContent: resolved.content });
-      }
-      const filtered = resolvedFiles;
-      if (filtered.length > 0) console.log(`  ${teamCfg.name}/${entry.monthName}: +${filtered.length} 个新文件`);
+      if (files.length > 0) console.log(`  ${teamCfg.name}/${entry.monthName}: +${files.length} 个新文件`);
 
-      for (const f of filtered) {
+      for (const f of files) {
         if (f.link && existingUrlSet.has(f.link)) continue;
 
-        const weekKey = getWeekKey(f.name, f._resolvedContent || '', null, f.mtime);
+        const resolved = await resolveMeetingDateForFile(teamCfg, f, pacer);
+        const weekKey = getWeekKey(f.name, resolved.content, resolved.date, f.mtime);
         if (weekKey === 'unknown') continue;
         if (!existingTeam.weeks[weekKey]) existingTeam.weeks[weekKey] = [];
 
-        const title = normalizeTitle(f.name, f._resolvedDate || null);
+        const title = normalizeTitle(f.name, resolved.date);
         const url = f.link || '';
 
         const titleKey = teamCfg.name + "::" + title;
