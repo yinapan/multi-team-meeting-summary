@@ -892,7 +892,7 @@ function enrichKanbanFromDocCache(kanbanData, cacheData) {
           for (const meeting of meetings || []) targetMeetings.push({ weekKey, meeting });
         }
 
-        const match = targetMeetings.find(({ meeting }) => {
+        let match = targetMeetings.find(({ meeting }) => {
           if (cacheMeeting.url && meeting.url && normalizeKdocsUrl(cacheMeeting.url) === normalizeKdocsUrl(meeting.url)) return true;
           const targetTitle = normalizeForMatch(normalizeTitle(meeting.text || ''));
           return cacheTitle && targetTitle && (
@@ -911,16 +911,23 @@ function enrichKanbanFromDocCache(kanbanData, cacheData) {
           continue;
         }
 
-        if (cacheMeeting.text && /^\d{8}\s+-\s+/.test(cacheMeeting.text)) {
-          match.meeting.text = cacheMeeting.text;
+        // 只有精确匹配才更新文本和做跨周移动；模糊匹配只补充 important 标记
+        const isExact = match.meeting.url && cacheMeeting.url
+          ? normalizeKdocsUrl(match.meeting.url) === normalizeKdocsUrl(cacheMeeting.url)
+          : normalizeForMatch(normalizeTitle(match.meeting.text || '')) === cacheTitle;
+
+        if (isExact) {
+          if (cacheMeeting.text && /^\d{8}\s+-\s+/.test(cacheMeeting.text)) {
+            match.meeting.text = cacheMeeting.text;
+          }
+          if (match.weekKey !== cacheWeekKey) {
+            targetTeam.weeks[match.weekKey] = (targetTeam.weeks[match.weekKey] || []).filter(m => m !== match.meeting);
+            if (!targetTeam.weeks[cacheWeekKey]) targetTeam.weeks[cacheWeekKey] = [];
+            if (!targetTeam.weeks[cacheWeekKey].includes(match.meeting)) targetTeam.weeks[cacheWeekKey].push(match.meeting);
+          }
         }
         if (cacheMeeting.important && (cacheMeeting.important === 'red' || !match.meeting.important)) {
           match.meeting.important = cacheMeeting.important;
-        }
-        if (match.weekKey !== cacheWeekKey) {
-          targetTeam.weeks[match.weekKey] = (targetTeam.weeks[match.weekKey] || []).filter(m => m !== match.meeting);
-          if (!targetTeam.weeks[cacheWeekKey]) targetTeam.weeks[cacheWeekKey] = [];
-          if (!targetTeam.weeks[cacheWeekKey].includes(match.meeting)) targetTeam.weeks[cacheWeekKey].push(match.meeting);
         }
       }
     }
