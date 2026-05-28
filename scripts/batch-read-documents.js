@@ -288,6 +288,7 @@ async function main() {
         info.drive_id = f.drive_id;
         info.url = f.link;
         info.sourceLabel = f.sourceLabel || null;
+        info.mtime = f.mtime || null;
         const num = i + 1;
         if (num % 5 === 0 || num === allFiles.length) {
           process.stdout.write(`  进度: ${num}/${allFiles.length}\r`);
