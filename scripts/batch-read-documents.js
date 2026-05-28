@@ -331,7 +331,7 @@ async function main() {
       const weekKey = getWeekKey(doc.name, '', doc.meetingDate);
       if (!weeks[weekKey]) weeks[weekKey] = { meetings: [], allConclusions: [], allTodos: [] };
       weeks[weekKey].meetings.push({
-        title: doc.name.replace(/\.(otl|docx)$/i, ''),
+        title: doc.name.replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, ''),
         url: doc.url || '',
         participants: doc.participants,
         meetingTime: doc.meetingTime,

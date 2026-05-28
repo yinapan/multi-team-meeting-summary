@@ -43,7 +43,7 @@ function sortTeamsByDocumentCount(teamDataList) {
 }
 
 function stripDocExt(name) {
-  return String(name || '').replace(/\.(otl|docx?|pdf|xlsx?|pptx?)$/i, '');
+  return String(name || '').replace(/\.(otl|docx?|pdf|xlsx?|pptx?|ksheet|wpp|dbsheet)$/i, '');
 }
 
 
