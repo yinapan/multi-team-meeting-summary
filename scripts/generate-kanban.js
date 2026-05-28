@@ -1069,6 +1069,9 @@ function mergeKanbanData(primaryData, fallbackData) {
       for (const meeting of meetings || []) {
         const key = meetingKey(fallbackTeam.name, meeting);
         if (seen.has(key)) continue;
+        // 同周次归一化标题也视为重复（URL 可能因扫描批次不同而变化）
+        const titleKey = normalizeForMatch(normalizeTitle(meeting.text || ''));
+        if (targetTeam.weeks[weekKey].some(m => normalizeForMatch(normalizeTitle(m.text || '')) === titleKey)) continue;
         targetTeam.weeks[weekKey].push({ ...meeting });
         seen.add(key);
       }
@@ -1251,15 +1254,16 @@ async function fullScan(config, importantMap) {
       if (!weekMap[weekKey]) { weekMap[weekKey] = []; weekTitleIndex[weekKey] = new Map(); }
       const title = normalizeTitle(f.name, resolved.date);
       const url = f.link || '';
-      // 同周次同标题去重：优先保留有 URL 的条目
-      const existing = weekTitleIndex[weekKey].get(title);
+      // 同周次同标题去重：用 normalizeForMatch 归一化后比较（去除"会议记录"等后缀差异）
+      const dedupKey = normalizeForMatch(title);
+      const existing = weekTitleIndex[weekKey].get(dedupKey);
       if (existing !== undefined) {
         if (url && !weekMap[weekKey][existing].url) {
           weekMap[weekKey][existing].url = url;
         }
         continue;
       }
-      weekTitleIndex[weekKey].set(title, weekMap[weekKey].length);
+      weekTitleIndex[weekKey].set(dedupKey, weekMap[weekKey].length);
       weekMap[weekKey].push({
         text: title,
         url,
