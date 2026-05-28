@@ -497,7 +497,7 @@ async function main() {
   }
 
   const teams = config.teams || [];
-  const reportConcurrency = Math.max(1, Number(config.llm && (config.llm.teamReportConcurrency || config.llm.reportConcurrency)) || 5);
+  const reportConcurrency = Math.max(1, Number(config.llm && (config.llm.teamReportConcurrency || config.llm.reportConcurrency)) || 2);
   let nextTeamIndex = 0;
   async function worker() {
     while (nextTeamIndex < teams.length) {
