@@ -588,8 +588,16 @@ function extractDateFromContent(markdown) {
   return null;
 }
 
-function extractMeetingDate(fileName, markdown = '') {
-  return extractDateFromFileName(fileName) || extractDateFromContent(markdown);
+function extractMeetingDate(fileName, markdown = '', mtime = null) {
+  const fromFile = extractDateFromFileName(fileName);
+  if (fromFile) return fromFile;
+  const fromContent = extractDateFromContent(markdown);
+  if (fromContent) return fromContent;
+  if (mtime) {
+    const d = new Date(mtime * 1000);
+    if (!isNaN(d.getTime())) return { month: d.getMonth() + 1, day: d.getDate() };
+  }
+  return null;
 }
 
 function meetingDateInRange(meetingDate, startDate, endDate) {
@@ -611,8 +619,8 @@ function dateInRange(fileName, startDate, endDate, markdown = '') {
   return meetingDateInRange(fileDate, startDate, endDate);
 }
 
-function getWeekKey(fileName, markdown = '', meetingDate = null) {
-  const d = meetingDate || extractMeetingDate(fileName, markdown);
+function getWeekKey(fileName, markdown = '', meetingDate = null, mtime = null) {
+  const d = meetingDate || extractMeetingDate(fileName, markdown, mtime);
   if (!d) return 'unknown';
   const date = new Date(currentYear(), d.month - 1, d.day);
   const dayOfWeek = date.getDay();

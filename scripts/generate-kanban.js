@@ -846,7 +846,7 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
       const docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim() || fileName.replace(/\.json$/i, '');
       const resolvedDate = extractMeetingDate(docTitle, cached.content);
       if (!resolvedDate) continue;
-      const weekKey = getWeekKey(docTitle, cached.content);
+      const weekKey = getWeekKey(docTitle, cached.content, null, cached.mtime);
       if (weekKey === 'unknown') continue;
 
       if (!weekMap[weekKey]) weekMap[weekKey] = [];
@@ -1246,7 +1246,7 @@ async function fullScan(config, importantMap) {
     const weekTitleIndex = {};
     for (const f of allFiles) {
       const resolved = await resolveMeetingDateForFile(teamCfg, f, pacer);
-      const weekKey = getWeekKey(f.name, resolved.content);
+      const weekKey = getWeekKey(f.name, resolved.content, null, f.mtime);
       if (weekKey === 'unknown') continue;
       if (!weekMap[weekKey]) { weekMap[weekKey] = []; weekTitleIndex[weekKey] = new Map(); }
       const title = normalizeTitle(f.name, resolved.date);
@@ -1337,7 +1337,7 @@ async function incrementalScan(config, existingData, importantMap) {
       for (const f of filtered) {
         if (f.link && existingUrlSet.has(f.link)) continue;
 
-        const weekKey = getWeekKey(f.name, f._resolvedContent || '');
+        const weekKey = getWeekKey(f.name, f._resolvedContent || '', null, f.mtime);
         if (weekKey === 'unknown') continue;
         if (!existingTeam.weeks[weekKey]) existingTeam.weeks[weekKey] = [];
 
