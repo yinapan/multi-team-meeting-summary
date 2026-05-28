@@ -558,10 +558,25 @@ async function main() {
             new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 3013, { bold: true }), cCell("进入正文分析与附录统计的文档", 3013)] }),
             new TableRow({ children: [cCell("文档纳入率", 3000), cCell(`${inclusionRate}%`, 3013, { bold: true }), cCell(`${reportCounts.analyzedDocumentCount}/${reportCounts.meetingListCount}`, 3013)] })
           ]}),
-          new Paragraph({ spacing: { before: 300 }, children: [
-            new TextRun({ text: "说明：", bold: true, size: 20, font: FONT }),
-            new TextRun({ text: `"会议清单数"为扫描到的全部会议条目；"成功读取数"为成功提取正文内容的文档；"纳入分析数"为最终进入报告分析的文档总数。两者差异主要来自部分文档格式（如 SVG 图片、电子表格等）无法通过文本接口读取正文，但不影响其在会议清单中的收录。`, size: 20, font: FONT, color: C.gray })
-          ]}),
+          ...(() => {
+            const gap = reportCounts.analyzedDocumentCount - reportCounts.successfulReadCount;
+            if (gap <= 0) return [];
+            const unreadableExts = new Set();
+            for (const t of (baseline && baseline.teams || [])) {
+              for (const m of (t.unreadableMeetings || [])) {
+                const ext = (m.name || '').match(/\.(\w+)$/i);
+                if (ext) unreadableExts.add(ext[1].toLowerCase());
+                else unreadableExts.add('无后缀');
+              }
+            }
+            const extList = [...unreadableExts].join('、');
+            return [
+              new Paragraph({ spacing: { before: 300 }, children: [
+                new TextRun({ text: "说明：", bold: true, size: 20, font: FONT }),
+                new TextRun({ text: `"会议清单数"为扫描到的全部会议条目；"成功读取数"为成功提取正文内容的文档；"纳入分析数"为最终进入报告分析的文档总数。本次有 ${gap} 份文档（${extList} 格式）无法通过文本接口读取正文，故成功读取数低于会议清单数，但不影响其在清单中的收录。`, size: 20, font: FONT, color: C.gray })
+              ]})
+            ];
+          })(),
           new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "— 报告完 —", color: C.gray, size: 20, font: FONT })] })
         ]
       }
