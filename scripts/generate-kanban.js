@@ -854,6 +854,10 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
       const id = fileName.replace(/\.json$/i, '');
       const meta = fileMetaIndex.get(id) || {};
       const url = cached.url || meta.url || '';
+      const isDup = weekMap[weekKey].some(m =>
+        (url && m.url && normalizeKdocsUrl(m.url) === normalizeKdocsUrl(url)) || m.text === title
+      );
+      if (isDup) continue;
       weekMap[weekKey].push({
         text: title,
         url,
@@ -899,7 +903,11 @@ function enrichKanbanFromDocCache(kanbanData, cacheData) {
 
         if (!match) {
           if (!targetTeam.weeks[cacheWeekKey]) targetTeam.weeks[cacheWeekKey] = [];
-          targetTeam.weeks[cacheWeekKey].push({ ...cacheMeeting });
+          const existing = targetTeam.weeks[cacheWeekKey];
+          const isDup = existing.some(m =>
+            (cacheMeeting.url && m.url && normalizeKdocsUrl(m.url) === normalizeKdocsUrl(cacheMeeting.url)) || m.text === cacheMeeting.text
+          );
+          if (!isDup) existing.push({ ...cacheMeeting });
           continue;
         }
 
@@ -1235,13 +1243,23 @@ async function fullScan(config, importantMap) {
     }
 
     const weekMap = {};
+    const weekTitleIndex = {};
     for (const f of allFiles) {
       const resolved = await resolveMeetingDateForFile(teamCfg, f, pacer);
       const weekKey = getWeekKey(f.name, resolved.content);
       if (weekKey === 'unknown') continue;
-      if (!weekMap[weekKey]) weekMap[weekKey] = [];
+      if (!weekMap[weekKey]) { weekMap[weekKey] = []; weekTitleIndex[weekKey] = new Map(); }
       const title = normalizeTitle(f.name, resolved.date);
       const url = f.link || '';
+      // 同周次同标题去重：优先保留有 URL 的条目
+      const existing = weekTitleIndex[weekKey].get(title);
+      if (existing !== undefined) {
+        if (url && !weekMap[weekKey][existing].url) {
+          weekMap[weekKey][existing].url = url;
+        }
+        continue;
+      }
+      weekTitleIndex[weekKey].set(title, weekMap[weekKey].length);
       weekMap[weekKey].push({
         text: title,
         url,

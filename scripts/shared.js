@@ -509,6 +509,13 @@ function extractDateFromFileName(fileName) {
     if (date) return date;
   }
 
+  // 匹配文件名末尾的 MMDD（无分隔符）: xxx0415, xxx0422
+  match = fileName.match(/(?:^|[^\d])(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
   return null;
 }
 
@@ -573,7 +580,8 @@ function extractDateFromContent(markdown) {
     if (!line.trim()) continue;
     nonEmptyCount++;
     if (nonEmptyCount > 5) break;
-    const date = dateFromLine(line, { startOnly: true });
+    const isHeading = /^\s{0,3}#{1,6}\s/.test(line);
+    const date = dateFromLine(line, { startOnly: true }) || (isHeading ? dateFromLine(line, { allowNoYear: true }) : null);
     if (date) return date;
   }
 
