@@ -634,8 +634,8 @@ function meetingDateInRange(meetingDate, startDate, endDate) {
   return fileNum >= startNum || fileNum <= endNum;
 }
 
-function dateInRange(fileName, startDate, endDate, markdown = '') {
-  const fileDate = extractMeetingDate(fileName, markdown);
+function dateInRange(fileName, startDate, endDate, markdown = '', mtime = null) {
+  const fileDate = extractMeetingDate(fileName, markdown, mtime);
   return meetingDateInRange(fileDate, startDate, endDate);
 }
 
