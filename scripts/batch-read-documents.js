@@ -313,7 +313,8 @@ async function main() {
     const unreadableMeetings = allFiles
       .filter(f => failedKeys.has(f.id))
       .map(f => ({ name: f.name, id: f.id, url: f.link || '', reason: 'read_failed' }));
-    const allMeetingItems = [...meetingListItems, ...unreadableMeetingItems];
+    const unreadableIds = new Set(unreadableMeetingItems.map(m => m.id).filter(Boolean));
+    const allMeetingItems = [...meetingListItems.filter(m => !unreadableIds.has(m.id)), ...unreadableMeetingItems];
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n  完成: ${documents.length} 篇, 耗时 ${elapsed}s [cache] 命中 ${cacheHit} 篇, API 拉取 ${apiFetch} 篇`);
 
