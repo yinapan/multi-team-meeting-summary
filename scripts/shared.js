@@ -86,7 +86,11 @@ const MAX_RETRIES = 6;
 const BASE_DELAY_MS = 3000;
 const MAX_DELAY_MS = 30000;
 const KDOCS_FILE_EXTS = ['otl', 'docx', 'ksheet', 'wpp', 'dbsheet'];
-const KDOCS_FILE_RE = /\.(otl|docx|ksheet|wpp|dbsheet)$/i;
+// 接受所有文件类型；只有 KDocs 内部的虚拟占位项（.drive/.folder/.form 无实际正文）需要排除
+const NON_DOC_PATTERN = /\.(drive)$/i;
+function isKdocsDocument(item) {
+  return item && item.type === 'file' && !NON_DOC_PATTERN.test(item.name || '');
+}
 
 function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end); }
@@ -711,7 +715,7 @@ function scanFolder(driveId, folderId, startDate, endDate, teamName) {
   for (const item of items) {
     if (item.type === 'folder') {
       files.push(...scanFolder(driveId, item.id, startDate, endDate, teamName));
-    } else if (item.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(item.name)) {
+    } else if (isKdocsDocument(item)) {
       if (dateInRange(item.name, startDate, endDate)) {
         files.push(normalizeKdocsFile(item, driveId));
       }
@@ -729,7 +733,7 @@ function scanFolderWithStats(driveId, folderId, startDate, endDate, teamName) {
       const sub = scanFolderWithStats(driveId, item.id, startDate, endDate, teamName);
       files.push(...sub.files);
       totalScanned += sub.totalScanned;
-    } else if (item.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(item.name)) {
+    } else if (isKdocsDocument(item)) {
       totalScanned++;
       if (dateInRange(item.name, startDate, endDate)) {
         files.push(normalizeKdocsFile(item, driveId));
@@ -906,7 +910,7 @@ function scanFolderAll(driveId, folderId, teamName) {
   for (const item of items) {
     if (item.type === 'folder') {
       files.push(...scanFolderAll(driveId, item.id, teamName));
-    } else if (item.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(item.name)) {
+    } else if (isKdocsDocument(item)) {
       files.push(normalizeKdocsFile(item, driveId));
     }
   }
@@ -1057,7 +1061,7 @@ async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, 
     subResults.push(await scanFolderAsync(driveId, sub.id, startDate, endDate, teamName, pacer));
   }
   const files = items
-    .filter(i => i.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(i.name) && dateInRange(i.name, startDate, endDate))
+    .filter(i => isKdocsDocument(i) && dateInRange(i.name, startDate, endDate))
     .map(i => normalizeKdocsFile(i, driveId));
   return files.concat(subResults.flat());
 }
@@ -1069,7 +1073,7 @@ async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, t
   for (const sub of subFolders) {
     subResults.push(await scanFolderWithStatsAsync(driveId, sub.id, startDate, endDate, teamName, pacer));
   }
-  const docFiles = items.filter(i => i.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(i.name));
+  const docFiles = items.filter(i => isKdocsDocument(i));
   const matchedFiles = docFiles
     .filter(i => dateInRange(i.name, startDate, endDate))
     .map(i => normalizeKdocsFile(i, driveId));
@@ -1086,7 +1090,7 @@ async function scanFolderAllAsync(driveId, folderId, teamName, pacer) {
     subResults.push(await scanFolderAllAsync(driveId, sub.id, teamName, pacer));
   }
   const files = items
-    .filter(i => i.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(i.name))
+    .filter(i => isKdocsDocument(i))
     .map(i => normalizeKdocsFile(i, driveId));
   return files.concat(subResults.flat());
 }
@@ -1101,7 +1105,7 @@ async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, 
   }
   const files = items
     .filter(i => {
-      if (i.type !== 'file' || !/\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(i.name)) return false;
+      if (!isKdocsDocument(i)) return false;
       const d = extractDateFromFileName(i.name);
       return d && (d.month * 100 + d.day) >= startNum;
     })
@@ -1710,7 +1714,7 @@ function groupByLabel(documents, teamName) {
 }
 
 function stripDocExt(name) {
-  return String(name || '').replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, '');
+  return String(name || '').replace(/\.\w+$/i, '');
 }
 
 function formatSourceRef(teamName, docOrName, options = {}) {
@@ -2245,7 +2249,7 @@ function scanFolderFromDate(driveId, folderId, startMonth, startDay, teamName) {
   for (const item of items) {
     if (item.type === 'folder') {
       files.push(...scanFolderFromDate(driveId, item.id, startMonth, startDay, teamName));
-    } else if (item.type === 'file' && /\.(otl|docx|ksheet|wpp|dbsheet)$/i.test(item.name)) {
+    } else if (isKdocsDocument(item)) {
       const d = extractDateFromFileName(item.name);
       if (d && (d.month * 100 + d.day) >= startNum) {
         files.push(normalizeKdocsFile(item, driveId));
@@ -2320,7 +2324,7 @@ function normalizeTitle(raw, explicitDate = null) {
   t = t.replace(/[\s\-—–_·．|｜]+$/, '');
   t = t.replace(/\s{2,}/g, ' ');
 
-  if (!dateStr) return raw.replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, '');
+  if (!dateStr) return raw.replace(/\.\w+$/i, '');
   return `${dateStr} - ${t}`;
 }
 
@@ -2784,7 +2788,7 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   parts.push('');
 
   for (const doc of data.documents) {
-    const name = (doc.name || '').replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, '');
+    const name = (doc.name || '').replace(/\.\w+$/i, '');
     parts.push(`### ${name}${doc.important ? '（重要会议）' : ''}`);
     parts.push(`  来源：${formatSourceRef(teamName, doc)}`);
     if (doc.conclusions && doc.conclusions.length > 0) {

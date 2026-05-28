@@ -989,7 +989,7 @@ function isImportantMeeting(url, title, importantMap) {
   const normalizedUrl = normalizeKdocsUrl(url);
   if (normalizedUrl && importantMap.has(normalizedUrl)) return importantMap.get(normalizedUrl);
   if (title) {
-    const normalized = title.replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, '');
+    const normalized = title.replace(/\.(\w+)$/i, '');
     if (importantMap.has(normalized)) return importantMap.get(normalized);
     const normalizedTitle = normalizeTitle(title);
     if (importantMap.has(normalizedTitle)) return importantMap.get(normalizedTitle);
