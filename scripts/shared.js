@@ -2390,12 +2390,34 @@ function resolveConfigPlaceholders(obj) {
 }
 
 // ========== 读取 OpenClaw 所有 provider ==========
+function resolveOpenClawConfigPath() {
+  const candidates = [];
+  // 1. 从脚本路径往上推导 .openclaw 目录
+  const scriptDir = path.resolve(__dirname);
+  const ocIdx = scriptDir.indexOf('.openclaw');
+  if (ocIdx >= 0) {
+    candidates.push(path.join(scriptDir.substring(0, ocIdx + '.openclaw'.length), 'openclaw.json'));
+  }
+  // 2. 从 cwd 往上推导
+  const cwd = process.cwd();
+  const cwdIdx = cwd.indexOf('.openclaw');
+  if (cwdIdx >= 0) {
+    candidates.push(path.join(cwd.substring(0, cwdIdx + '.openclaw'.length), 'openclaw.json'));
+  }
+  // 3. 环境变量
+  const home = process.env.OPENCLAW_HOME || process.env.USERPROFILE || process.env.HOME;
+  if (home) candidates.push(path.join(home, '.openclaw', 'openclaw.json'));
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 function resolveOpenClawProviders() {
   const providers = [];
   try {
-    const home = process.env.USERPROFILE || process.env.HOME;
-    const cfgPath = path.join(home, '.openclaw', 'openclaw.json');
-    if (!fs.existsSync(cfgPath)) return providers;
+    const cfgPath = resolveOpenClawConfigPath();
+    if (!cfgPath) return providers;
     const data = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
     const provMap = data.models?.providers || {};
     const preferredModels = ['mimo-v2-pro', 'glm-5.1', 'mco-4', 'deepseek-v3.2', 'kimi-k2.5'];
