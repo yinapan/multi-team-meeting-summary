@@ -975,7 +975,8 @@ async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests',
 async function listFolderAsync(driveId, parentId, teamName, pacer) {
   const cacheFile = path.join(teamFoldersCacheDir(teamName), `${driveId}_${parentId}.json`);
   const cached = readCache(cacheFile);
-  if (cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) {
+  const skipCache = pacer && pacer.forceRefresh;
+  if (!skipCache && cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) {
     return cached.items;
   }
 

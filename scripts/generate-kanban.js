@@ -1218,8 +1218,9 @@ function findLatestDate(kanbanData) {
 }
 
 // ========== 全量扫描（默认递归扫描，避免 search-files 漏掉嵌套目录） ==========
-async function fullScan(config, importantMap) {
+async function fullScan(config, importantMap, forceRefresh = false) {
   const pacer = new RequestPacer();
+  if (forceRefresh) pacer.forceRefresh = true;
   const scanMode = getKdocsScanMode();
   console.log(`并行扫描 ${config.teams.length} 个团队（${scanMode}）...`);
 
@@ -1422,7 +1423,7 @@ async function main() {
     const scanMode = determineScanMode(args, fs.existsSync(dataFilePath));
     if (scanMode === 'full') {
       console.log(refresh ? '强制全量扫描...' : '执行全量扫描，确保看板数据完整...');
-      const fullResult = await fullScan(config, importantMap);
+      const fullResult = await fullScan(config, importantMap, refresh);
       const scannedData = fullResult.data || fullResult;
       scanPacer = fullResult.pacer || null;
       if (fs.existsSync(dataFilePath)) {
