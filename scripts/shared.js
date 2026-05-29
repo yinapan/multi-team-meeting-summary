@@ -81,7 +81,18 @@ const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
 // ========== 缓存 ==========
 const CACHE_DIR = path.join(__dirname, '..', 'cache');
 const FOLDER_CACHE_TTL = Number(getKdocsConfig().cacheTtlMs) || 3600000;
+const RATE_LIMIT_FREQUENCY = new Set([429001]);
+const RATE_LIMIT_QUOTA = new Set([429002]);
+const RATE_LIMIT_CONCURRENCY = new Set([429003]);
 const RETRY_CODES = new Set([429001, 429002, 429003]);
+
+function classifyRateLimitCode(code) {
+  if (RATE_LIMIT_FREQUENCY.has(code)) return 'frequency';
+  if (RATE_LIMIT_QUOTA.has(code)) return 'quota';
+  if (RATE_LIMIT_CONCURRENCY.has(code)) return 'concurrency';
+  return null;
+}
+
 const MAX_RETRIES = 6;
 const BASE_DELAY_MS = 3000;
 const MAX_DELAY_MS = 30000;
@@ -115,6 +126,8 @@ class RequestPacer {
       ? options.useCacheOnRateLimit
       : cfg.useCacheOnRateLimit !== false;
     this.successSinceRateLimit = 0;
+    this.concurrencyRecoveryCount = 0;
+    this.originalMaxConcurrent = this.maxConcurrent;
     this.active = 0;
     this.queue = [];
     this.lastRequestTime = 0;
@@ -162,19 +175,35 @@ class RequestPacer {
     });
   }
 
-  noteRateLimit(cooldownMs = this.rateLimitCooldownMs) {
+  noteRateLimit(cooldownMs, type) {
     this.stats.rateLimits++;
     this.successSinceRateLimit = 0;
-    this.currentIntervalMs = Math.min(this.adaptiveMaxIntervalMs, this.currentIntervalMs + this.adaptiveStepMs);
-    this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + cooldownMs);
+    if (type === 'quota') {
+      this.currentIntervalMs = this.adaptiveMaxIntervalMs;
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + (typeof cooldownMs === 'number' ? cooldownMs : 1800000));
+    } else if (type === 'concurrency') {
+      this.maxConcurrent = Math.max(1, Math.floor(this.maxConcurrent / 2));
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + (typeof cooldownMs === 'number' ? cooldownMs : 10000));
+    } else {
+      this.currentIntervalMs = Math.min(this.adaptiveMaxIntervalMs, this.currentIntervalMs + this.adaptiveStepMs);
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + (typeof cooldownMs === 'number' ? cooldownMs : this.rateLimitCooldownMs));
+    }
   }
 
   noteSuccess() {
-    if (this.currentIntervalMs <= this.minIntervalMs) return;
-    this.successSinceRateLimit++;
-    if (this.successSinceRateLimit >= this.recoverySuccesses) {
-      this.currentIntervalMs = Math.max(this.minIntervalMs, this.currentIntervalMs - this.adaptiveStepMs);
-      this.successSinceRateLimit = 0;
+    if (this.currentIntervalMs > this.minIntervalMs) {
+      this.successSinceRateLimit++;
+      if (this.successSinceRateLimit >= this.recoverySuccesses) {
+        this.currentIntervalMs = Math.max(this.minIntervalMs, this.currentIntervalMs - this.adaptiveStepMs);
+        this.successSinceRateLimit = 0;
+      }
+    }
+    if (this.maxConcurrent < this.originalMaxConcurrent) {
+      this.concurrencyRecoveryCount = (this.concurrencyRecoveryCount || 0) + 1;
+      if (this.concurrencyRecoveryCount >= this.recoverySuccesses) {
+        this.maxConcurrent = Math.min(this.originalMaxConcurrent, this.maxConcurrent + 1);
+        this.concurrencyRecoveryCount = 0;
+      }
     }
   }
 
@@ -954,7 +983,7 @@ function shouldUseCacheImmediately(parsedOrCode) {
   const cfg = getKdocsConfig();
   if (cfg.useCacheOnRateLimit === false) return false;
   const code = typeof parsedOrCode === 'number' ? parsedOrCode : parsedOrCode && parsedOrCode.code;
-  return RETRY_CODES.has(code);
+  return RATE_LIMIT_FREQUENCY.has(code) || RATE_LIMIT_QUOTA.has(code);
 }
 
 async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests', beforeSpawn = null) {
@@ -1012,7 +1041,7 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
       const parsed = JSON.parse(stdout);
       if (parsed && parsed.code && parsed.code !== 0) {
         if (shouldUseCacheImmediately(parsed)) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(0);
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(0, classifyRateLimitCode(parsed.code));
           if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
           if (cached) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
@@ -1023,7 +1052,7 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
           return [];
         }
         if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit();
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(parsed.code));
           if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
           const delay = retryDelay(attempt);
           process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
@@ -1327,7 +1356,8 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
       if (parsed && parsed.code && parsed.code !== 0) {
         lastCode = parsed.code;
         if (RETRY_CODES.has(parsed.code)) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(shouldUseCacheImmediately(parsed) ? 0 : undefined);
+          const rlType = classifyRateLimitCode(parsed.code);
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(shouldUseCacheImmediately(parsed) ? 0 : undefined, rlType);
           if (shouldUseCacheImmediately(parsed)) {
             if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
             if (cached) {
@@ -3150,7 +3180,7 @@ module.exports = {
   listFolderAsync, searchFilesAsync: searchFilesAsyncRateLimited, dateToUnixSeconds,
   scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, dedupeKdocsFiles,
-  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs,
+  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, classifyRateLimitCode,
   formatGenerationMode, printAiReviewWarning,
   getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   normalizeTitle, normalizeForMatch, charSimilarity,

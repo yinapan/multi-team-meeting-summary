@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, meetingDateInRange, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamScanEntries, scanFilesByMode, dedupeKdocsFiles, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, meetingDateInRange, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamScanEntries, scanFilesByMode, dedupeKdocsFiles, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline, classifyRateLimitCode } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
@@ -65,10 +65,17 @@ async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl
       try {
         const result = JSON.parse(stdout);
         if (result && result.code && result.code !== 0) {
-          if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteRateLimit === 'function') {
-            pacer.noteRateLimit(0);
+          if (pacer && typeof pacer.noteRateLimit === 'function') {
+            const rlType = classifyRateLimitCode(result.code);
+            if (rlType === 'concurrency') {
+              pacer.noteRateLimit(undefined, 'concurrency');
+            } else if (rlType === 'quota') {
+              pacer.noteRateLimit(0, 'quota');
+            } else {
+              pacer.noteRateLimit(0);
+            }
           }
-          if ([429001, 429002, 429003].includes(result.code) && pacer && typeof pacer.noteCacheRebuild === 'function') {
+          if ([429001, 429002].includes(result.code) && pacer && typeof pacer.noteCacheRebuild === 'function') {
             pacer.noteCacheRebuild('rate-limit-document-cache');
           }
           process.stderr.write(`[readDoc] API error file=${fileId} code=${result.code}\n`);
