@@ -2,12 +2,11 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  resolveWorkspaceDir, currentYear, searchFilesAsync, scanFolderAllAsync,
+  resolveWorkspaceDir, currentYear, searchFilesAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeTitle, normalizeForMatch, charSimilarity, getTeamScanEntries,
-  RequestPacer, extractParticipants, teamDocsCacheDir, readCache, getKdocsScanMode, scanFilesByMode,
-  outputPath, findInputFile, writeOutputJson
+  RequestPacer, extractParticipants, teamDocsCacheDir, readCache, getKdocsScanMode, scanFilesByMode, scanAllTeams,
+  outputPath, findInputFile, writeOutputJson, readDocAsync, runPool
 } = require('./shared');
-const { readDocAsync, runPool } = require('./batch-read-documents');
 
 const DATA_FILE = '会议看板-data.json';
 const HTML_FILE = '会议看板.html';
@@ -840,19 +839,41 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
     for (const fileName of fs.readdirSync(docsDir)) {
       if (!fileName.endsWith('.json')) continue;
       const cached = readCache(path.join(docsDir, fileName));
-      if (!cached || !cached.content) continue;
+      if (!cached) continue;
+      const id = fileName.replace(/\.json$/i, '');
+      const meta = fileMetaIndex.get(id) || {};
 
-      const firstLine = String(cached.content || '').split(/\r?\n/).find(line => line.trim()) || '';
-      const docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim() || fileName.replace(/\.json$/i, '');
-      const resolvedDate = extractMeetingDate(docTitle, cached.content);
-      if (!resolvedDate) continue;
-      const weekKey = getWeekKey(docTitle, cached.content, null, cached.mtime);
-      if (weekKey === 'unknown') continue;
+      let docTitle;
+      if (cached.content) {
+        const firstLine = String(cached.content).split(/\r?\n/).find(line => line.trim()) || '';
+        docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim() || meta.name || id;
+      } else if (cached.unreadable) {
+        docTitle = meta.name || id;
+      } else {
+        continue;
+      }
+
+      let resolvedDate = extractMeetingDate(docTitle, cached.content || '', null, cached.ctime, cached.folderName);
+      if (!resolvedDate && (cached.ctime || cached.mtime)) {
+        const ts = cached.ctime || cached.mtime;
+        if (!isNaN(new Date(ts * 1000).getTime())) {
+          const d = new Date(ts * 1000);
+          resolvedDate = { month: d.getMonth() + 1, day: d.getDate() };
+        }
+      }
+      if (!resolvedDate) resolvedDate = { month: 1, day: 1 };
+      let weekKey = getWeekKey(docTitle, cached.content || '', resolvedDate);
+      if (weekKey === 'unknown') {
+        const ts = cached.ctime || cached.mtime;
+        if (ts && !isNaN(new Date(ts * 1000).getTime())) {
+          const d = new Date(ts * 1000);
+          weekKey = getWeekKey(docTitle, '', { month: d.getMonth() + 1, day: d.getDate() });
+        }
+      }
+      if (weekKey === 'unknown') weekKey = 'unresolved';
 
       if (!weekMap[weekKey]) weekMap[weekKey] = [];
       const title = normalizeTitle(docTitle, resolvedDate);
-      const id = fileName.replace(/\.json$/i, '');
-      const meta = fileMetaIndex.get(id) || {};
       const url = cached.url || meta.url || '';
       const isDup = weekMap[weekKey].some(m =>
         (url && m.url && normalizeKdocsUrl(m.url) === normalizeKdocsUrl(url)) || m.text === title
@@ -1026,10 +1047,10 @@ async function resolveMeetingDateForFile(teamCfg, file, pacer) {
   let content = cached && cached.mtime === file.mtime ? (cached.content || '') : '';
 
   if (!content && file.drive_id) {
-    content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '');
+    content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '', file.ctime, file.folderName);
   }
 
-  return { date: extractMeetingDate(file.name, content), content: content || '' };
+  return { date: extractMeetingDate(file.name, content, null, file.ctime, file.folderName), content: content || '' };
 }
 
 function determineScanMode(args, hasExistingData) {
@@ -1221,41 +1242,31 @@ function findLatestDate(kanbanData) {
 async function fullScan(config, importantMap, forceRefresh = false) {
   const pacer = new RequestPacer();
   if (forceRefresh) pacer.forceRefresh = true;
-  const scanMode = getKdocsScanMode();
-  console.log(`并行扫描 ${config.teams.length} 个团队（${scanMode}）...`);
+  console.log(`扫描 ${config.teams.length} 个团队...`);
 
-  const teamResults = await Promise.all(config.teams.map(async (teamCfg) => {
-    const allFiles = [];
-    const monthEntries = getTeamScanEntries(teamCfg);
-    for (const entry of monthEntries) {
-      try {
-        const { files, stats } = await scanFilesByMode(entry, {
-          teamName: teamCfg.name,
-          pacer,
-          mode: scanMode,
-          includeAll: true
-        });
-        allFiles.push(...files);
-        const supplement = stats.recursiveSupplementCount ? `，递归补 ${stats.recursiveSupplementCount}` : '';
-        console.log(`  ${teamCfg.name}/${entry.monthName}: ${files.length} 个文件 [${stats.mode}; search ${stats.searchCount}; recursive ${stats.recursiveCount}${supplement}]`);
-      } catch (e) {
-        console.log(`  ${teamCfg.name}/${entry.monthName}: ${scanMode} 失败 (${e.message.substring(0, 80)})`);
-        const files = await scanFolderAllAsync(entry.source.drive_id, entry.folderId, teamCfg.name, pacer);
-        allFiles.push(...files);
-        console.log(`  ${teamCfg.name}/${entry.monthName}: fallback ${files.length} 个文件`);
-      }
-    }
+  const scannedTeams = await scanAllTeams(config, null, null, pacer, { includeAll: true });
+
+  const teamResults = await Promise.all(scannedTeams.map(async (scanned) => {
+    const teamCfg = config.teams.find(t => t.name === scanned.team);
+    if (!teamCfg) return { name: scanned.team, weeks: {} };
+    const allFiles = scanned.files;
 
     const weekMap = {};
     const weekTitleIndex = {};
     for (const f of allFiles) {
       const resolved = await resolveMeetingDateForFile(teamCfg, f, pacer);
-      const weekKey = getWeekKey(f.name, resolved.content, null, f.mtime);
-      if (weekKey === 'unknown') continue;
+      let weekKey = getWeekKey(f.name, resolved.content, null, f.mtime, f.ctime, f.folderName);
+      if (weekKey === 'unknown') {
+        const ts = f.ctime || f.mtime;
+        if (ts && !isNaN(new Date(ts * 1000).getTime())) {
+          const d = new Date(ts * 1000);
+          weekKey = getWeekKey(f.name, '', { month: d.getMonth() + 1, day: d.getDate() });
+        }
+      }
+      if (weekKey === 'unknown') weekKey = 'unresolved';
       if (!weekMap[weekKey]) { weekMap[weekKey] = []; weekTitleIndex[weekKey] = new Map(); }
       const title = normalizeTitle(f.name, resolved.date);
       const url = f.link || '';
-      // 同周次同标题去重：用 normalizeForMatch 归一化后比较（去除"会议记录"等后缀差异）
       const dedupKey = normalizeForMatch(title);
       const existing = weekTitleIndex[weekKey].get(dedupKey);
       if (existing !== undefined) {
@@ -1271,7 +1282,7 @@ async function fullScan(config, importantMap, forceRefresh = false) {
         important: isImportantMeeting(url, f.name, importantMap)
       });
     }
-    return { name: teamCfg.name, weeks: weekMap };
+    return { name: scanned.team, weeks: weekMap };
   }));
 
   return { data: { teams: teamResults, lastUpdate: new Date().toISOString().slice(0, 10) }, pacer };
@@ -1339,8 +1350,15 @@ async function incrementalScan(config, existingData, importantMap) {
         if (f.link && existingUrlSet.has(f.link)) continue;
 
         const resolved = await resolveMeetingDateForFile(teamCfg, f, pacer);
-        const weekKey = getWeekKey(f.name, resolved.content, resolved.date, f.mtime);
-        if (weekKey === 'unknown') continue;
+        let weekKey = getWeekKey(f.name, resolved.content, resolved.date, f.mtime, f.ctime, f.folderName);
+        if (weekKey === 'unknown') {
+          const ts = f.ctime || f.mtime;
+          if (ts && !isNaN(new Date(ts * 1000).getTime())) {
+            const d = new Date(ts * 1000);
+            weekKey = getWeekKey(f.name, '', { month: d.getMonth() + 1, day: d.getDate() });
+          }
+        }
+        if (weekKey === 'unknown') weekKey = 'unresolved';
         if (!existingTeam.weeks[weekKey]) existingTeam.weeks[weekKey] = [];
 
         const title = normalizeTitle(f.name, resolved.date);
@@ -1468,7 +1486,6 @@ async function main() {
     kanbanData = enrichKanbanFromDocCache(kanbanData, cacheKanbanData);
     applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: true });
   }
-  kanbanData = pruneMeetingsWithoutConcreteDate(kanbanData);
 
   const writtenDataFile = writeOutputJson(DATA_FILE, kanbanData);
 

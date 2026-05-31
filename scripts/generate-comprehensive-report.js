@@ -378,7 +378,7 @@ async function main() {
       data = { team: team.name, documents };
     }
     data.documents = data.documents.filter(d =>
-      d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '', d.mtime || null)
+      d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '', d.mtime || null, d.ctime || null, d.folderName || null)
     );
     if (data.documents.length === 0) { console.log(`跳过 ${team.name}：日期范围内无文档`); continue; }
     const analysis = analyzeDocs(data.documents, team.name, { startDate, endDate });

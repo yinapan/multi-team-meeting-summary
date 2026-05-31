@@ -1,156 +1,8 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, meetingDateInRange, teamDocsCacheDir, ensureCacheDir, readCache, writeCache, getTeamScanEntries, scanFilesByMode, dedupeKdocsFiles, RequestPacer, extractInfo, getKdocsConfig, getKdocsScanMode, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, outputPath, writeOutputJson, writeMeetingBaseline, classifyRateLimitCode } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, teamDocsCacheDir, ensureCacheDir, readCache, scanAllTeams, RequestPacer, extractInfo, getKdocsConfig, outputPath, writeOutputJson, writeMeetingBaseline, readDocAsync, runPool } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
-
-async function readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl) {
-  const cacheFile = path.join(teamDocsCacheDir(teamName), `${fileId}.json`);
-  const cached = readCache(cacheFile);
-  if (cached && cached.mtime === mtime) {
-    return cached.content;
-  }
-  if (cached && cached.content && pacer && typeof pacer.shouldPreferCache === 'function' && pacer.shouldPreferCache()) {
-    if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-    if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-document-cache');
-    return cached.content;
-  }
-  if (!cached && pacer && typeof pacer.shouldPreferCache === 'function' && pacer.shouldPreferCache()) {
-    if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-document-cache');
-    return '';
-  }
-
-  if (pacer) await pacer.acquire();
-  return new Promise((resolve) => {
-    let released = false;
-    const release = () => {
-      if (!released && pacer) {
-        released = true;
-        pacer.release();
-      }
-    };
-    // 解析 read-file (新版) 返回的各种格式
-    function extractContentFromReadFile(parsed) {
-      const data = (parsed && parsed.data && parsed.data.data) || (parsed && parsed.data) || {};
-      const content = data.content;
-      if (!content) return '';
-      if (typeof content === 'string') return content;
-      // ksheet 等结构化格式：提取单元格文本
-      if (content.range_data) {
-        const cells = content.range_data.detail?.rangeData || [];
-        return cells.map(c => c.cellText || c.originalCellValue || '').filter(Boolean).join('\n');
-      }
-      return '';
-    }
-
-    // 先尝试新版 read-file API（兼容更多格式）
-    const inputJson = JSON.stringify({ file_id: fileId });
-    if (pacer && typeof pacer.noteRequest === 'function') pacer.noteRequest('read');
-    const child = require('child_process').spawn(getKdocsCliPath(), getKdocsCliArgs(['drive', 'read-file', '--output', 'json']), {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
-    });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => { child.kill(); }, 30000);
-    child.stdout.on('data', d => { stdout += d; });
-    child.stderr.on('data', d => { stderr += d; });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      release();
-      if (code !== 0 || !stdout) {
-        if (stderr) process.stderr.write(`[readDoc] 失败 file=${fileId}: ${stderr.substring(0, 100)}\n`);
-        resolve(cached && cached.content ? cached.content : '');
-        return;
-      }
-      try {
-        const result = JSON.parse(stdout);
-        if (result && result.code && result.code !== 0) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') {
-            const rlType = classifyRateLimitCode(result.code);
-            if (rlType === 'concurrency') {
-              pacer.noteRateLimit(undefined, 'concurrency');
-            } else if (rlType === 'quota') {
-              pacer.noteRateLimit(0, 'quota');
-            } else {
-              pacer.noteRateLimit(0);
-            }
-          }
-          if ([429001, 429002].includes(result.code) && pacer && typeof pacer.noteCacheRebuild === 'function') {
-            pacer.noteCacheRebuild('rate-limit-document-cache');
-          }
-          process.stderr.write(`[readDoc] API error file=${fileId} code=${result.code}\n`);
-          if (cached && cached.content) {
-            process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
-            resolve(cached.content);
-            return;
-          }
-          resolve('');
-          return;
-        }
-        const content = extractContentFromReadFile(result);
-        if (content) {
-          if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
-          writeCache(cacheFile, { content, mtime, url: fileUrl || '', fetched_at: Date.now() });
-        }
-        resolve(content);
-      } catch (e) {
-        process.stderr.write(`[readDoc] JSON解析失败 file=${fileId}: ${e.message.substring(0, 80)}\n`);
-        if (cached && cached.content) {
-          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-          process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
-          resolve(cached.content);
-          return;
-        }
-        resolve('');
-      }
-    });
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      release();
-      process.stderr.write(`[readDoc] 启动失败 file=${fileId}: ${e.message.substring(0, 100)}\n`);
-      if (cached && cached.content) {
-        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-        process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
-        resolve(cached.content);
-        return;
-      }
-      resolve('');
-    });
-    child.stdin.write(inputJson);
-    child.stdin.end();
-  });
-}
-
-async function readDocAsync(driveId, fileId, mtime, teamName, pacer, fileUrl) {
-  const maxAttempts = Number(getKdocsConfig().documentReadRetries) || 3;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const content = await readDocOnceAsync(driveId, fileId, mtime, teamName, pacer, fileUrl);
-    if (content || attempt === maxAttempts - 1) return content;
-    if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
-    const delay = Math.min(3000 * Math.pow(2, attempt), 15000) + Math.floor(Math.random() * 500);
-    await new Promise(resolve => setTimeout(resolve, delay));
-  }
-  return '';
-}
-
-async function runPool(tasks, concurrency) {
-  const results = new Array(tasks.length);
-  let idx = 0;
-
-  async function worker() {
-    while (idx < tasks.length) {
-      const i = idx++;
-      results[i] = await tasks[i]();
-    }
-  }
-
-  const workers = [];
-  for (let i = 0; i < Math.min(concurrency, tasks.length); i++) {
-    workers.push(worker());
-  }
-  await Promise.all(workers);
-  return results;
-}
 
 function writeRunDiagnostics(workspaceDir, pacer, failedDocuments, startedAt, warmCacheOnly) {
   const elapsedSec = Number(((Date.now() - startedAt) / 1000).toFixed(1));
@@ -197,55 +49,13 @@ async function main() {
   const failedDocuments = [];
   const pacer = new RequestPacer();
 
-  for (let ti = 0; ti < config.teams.length; ti++) {
-    const teamCfg = config.teams[ti];
+  const scannedTeams = await scanAllTeams(config, startDate, endDate, pacer, { includeAll: true });
+
+  for (const scanned of scannedTeams) {
+    const teamCfg = config.teams.find(t => t.name === scanned.team);
+    if (!teamCfg) continue;
     console.log(`\n===== ${teamCfg.name} =====`);
-    const allFiles = [];
-    let teamTotalScanned = 0;
-
-    const monthEntries = getTeamScanEntries(teamCfg);
-
-    const scanMode = getKdocsScanMode();
-
-    try {
-      for (const entry of monthEntries) {
-        const { files, stats } = await scanFilesByMode(entry, {
-          teamName: teamCfg.name,
-          startDate,
-          endDate,
-          pacer,
-          mode: scanMode,
-          includeAll: true
-        });
-        files.forEach(f => f.sourceLabel = entry.label);
-        allFiles.push(...files);
-        teamTotalScanned += stats.totalScanned || files.length;
-        const supplement = stats.recursiveSupplementCount ? `，递归补 ${stats.recursiveSupplementCount}` : '';
-        console.log(`扫描 ${entry.label ? entry.label + ' ' : ''}${entry.monthName}: ${files.length}/${stats.totalScanned || files.length} 个文件匹配 [${stats.mode}; search ${stats.searchCount}; recursive ${stats.recursiveCount}${supplement}]`);
-      }
-    } catch (e) {
-      process.stderr.write(`[batch-read] ${scanMode} 扫描失败 ${teamCfg.name}: ${e.message}\n`);
-      allFiles.length = 0;
-      teamTotalScanned = 0;
-      for (const entry of monthEntries) {
-        const { files, stats } = await scanFilesByMode(entry, {
-          teamName: teamCfg.name,
-          startDate,
-          endDate,
-          pacer,
-          mode: 'recursive',
-          includeAll: true
-        });
-        files.forEach(f => f.sourceLabel = entry.label);
-        allFiles.push(...files);
-        teamTotalScanned += stats.totalScanned || files.length;
-        console.log(`  fallback ${entry.label ? entry.label + ' ' : ''}${entry.monthName}: ${files.length}/${stats.totalScanned || files.length} 个文件匹配`);
-      }
-    }
-
-    const uniqueFiles = dedupeKdocsFiles(allFiles);
-    allFiles.length = 0;
-    allFiles.push(...uniqueFiles);
+    const allFiles = scanned.files;
 
     const candidateCount = allFiles.length;
     if (candidateCount === 0) {
@@ -272,7 +82,7 @@ async function main() {
         if (pacer && typeof pacer.noteApiFetch === 'function') pacer.noteApiFetch();
       }
 
-      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer, f.link || '').then(md => {
+      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer, f.link || '', f.ctime, f.folderName).then(md => {
         f._readContent = md || '';
         if (!md) {
           failedDocuments.push({
@@ -286,16 +96,18 @@ async function main() {
           });
           return null;
         }
-        if (!dateInRange(f.name, startDate, endDate, md, f.mtime)) return null;
+        if (!dateInRange(f.name, startDate, endDate, md, f.mtime, f.ctime, f.folderName)) return null;
         if (warmCacheOnly) return null;
         const teamPeople = teamCfg.leader ? [...importantPeople, teamCfg.leader] : importantPeople;
         const info = extractInfo(md, f.name, teamPeople);
-        info.meetingDate = extractMeetingDate(f.name, md) || null;
+        info.meetingDate = extractMeetingDate(f.name, md, null, f.ctime, f.folderName) || null;
         info.id = f.id;
         info.drive_id = f.drive_id;
         info.url = f.link;
         info.sourceLabel = f.sourceLabel || null;
         info.mtime = f.mtime || null;
+        info.ctime = f.ctime || null;
+        info.folderName = f.folderName || null;
         const num = i + 1;
         if (num % 5 === 0 || num === allFiles.length) {
           process.stdout.write(`  进度: ${num}/${allFiles.length}\r`);
@@ -306,14 +118,39 @@ async function main() {
 
     const rawResults = await runPool(tasks, CONCURRENCY);
     const documents = rawResults.filter(Boolean);
+
+    // 不可读文件也作为占位文档纳入，确保看板和报告不丢失记录
+    for (const f of allFiles) {
+      if (!failedDocuments.some(fd => fd.id === f.id && fd.team === teamCfg.name)) continue;
+      if (documents.find(d => d.id === f.id)) continue;
+      if (!dateInRange(f.name, startDate, endDate, '', f.mtime, f.ctime, f.folderName)) continue;
+      documents.push({
+        name: f.name,
+        id: f.id,
+        drive_id: f.drive_id,
+        url: f.link || '',
+        sourceLabel: f.sourceLabel || null,
+        mtime: f.mtime || null,
+        ctime: f.ctime || null,
+        folderName: f.folderName || null,
+        meetingDate: extractMeetingDate(f.name, '', f.mtime, f.ctime, f.folderName) || null,
+        participants: [],
+        meetingTime: null,
+        conclusions: [],
+        todos: [],
+        important: null,
+        rawContent: '',
+        unreadable: true
+      });
+    }
     const analyzedIds = new Set(documents.map(doc => doc.id).filter(Boolean));
     const failedKeys = new Set(failedDocuments.filter(doc => doc.team === teamCfg.name).map(doc => doc.id).filter(Boolean));
     const meetingListItems = allFiles
-      .filter(f => dateInRange(f.name, startDate, endDate, f._readContent || '', f.mtime))
+      .filter(f => dateInRange(f.name, startDate, endDate, f._readContent || '', f.mtime, f.ctime, f.folderName))
       .map(f => ({ name: f.name, id: f.id, url: f.link || '', sourceLabel: f.sourceLabel || null }));
     const unreadableMeetingItems = allFiles
-      .filter(f => failedKeys.has(f.id) && dateInRange(f.name, startDate, endDate, '', f.mtime))
-      .map(f => ({ name: f.name, id: f.id, url: f.link || '', sourceLabel: f.sourceLabel || null, unreadable: true }));
+      .filter(f => failedKeys.has(f.id) && dateInRange(f.name, startDate, endDate, '', null, f.ctime, f.folderName))
+      .map(f => ({ name: f.name, id: f.id, url: f.link || '', sourceLabel: f.sourceLabel || null, unreadable: true, folderName: f.folderName || null, ctime: f.ctime || null }));
     const excludedMeetings = allFiles
       .filter(f => !meetingListItems.some(item => item.id === f.id) && !failedKeys.has(f.id))
       .map(f => ({ name: f.name, id: f.id, url: f.link || '', reason: 'out_of_date_range_after_content_check' }));
@@ -366,6 +203,25 @@ async function main() {
       weeks[weekKey].allConclusions.push(...doc.conclusions);
       weeks[weekKey].allTodos.push(...doc.todos);
     }
+    for (const m of (td.unreadableMeetings || [])) {
+      const doc = td.documents.find(d => d.id === m.id);
+      if (doc) continue;
+      const weekKey = getWeekKey(m.name, '', null, null, m.ctime || null, m.folderName || null);
+      if (weekKey === 'unknown') continue;
+      if (!weeks[weekKey]) weeks[weekKey] = { meetings: [], allConclusions: [], allTodos: [] };
+      weeks[weekKey].meetings.push({
+        title: m.name.replace(/\.(\w+)$/i, ''),
+        url: m.url || '',
+        participants: [],
+        meetingTime: null,
+        conclusions: [],
+        todos: [],
+        important: null,
+        rawContent: '',
+        sourceLabel: m.sourceLabel || null,
+        meetingDate: extractMeetingDate(m.name, '', null, m.ctime || null, m.folderName || null) || null
+      });
+    }
     return { team: td.team, weeks };
   });
 
@@ -396,8 +252,3 @@ async function main() {
 if (require.main === module) {
   main().catch(console.error);
 }
-
-module.exports = {
-  readDocAsync,
-  runPool
-};

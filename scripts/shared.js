@@ -148,11 +148,6 @@ class RequestPacer {
   acquire() {
     return new Promise(resolve => {
       const tryRun = () => {
-        if (this.shouldPreferCache()) {
-          this.active++;
-          resolve();
-          return;
-        }
         if (this.active >= this.maxConcurrent) {
           this.queue.push(tryRun);
           return;
@@ -222,7 +217,7 @@ class RequestPacer {
   }
 
   shouldPreferCache() {
-    return this.useCacheOnRateLimit && (!!this.stats.cacheRebuildUsed || this.stats.rateLimits > 0);
+    return this.useCacheOnRateLimit && !!this.stats.cacheRebuildUsed;
   }
 
   noteCacheHit() {
@@ -560,6 +555,18 @@ function extractDateFromFileName(fileName) {
   return null;
 }
 
+function extractDateFromFolderName(folderName) {
+  if (!folderName) return null;
+  const text = String(folderName).trim();
+  const match = text.match(/^(\d{1,2})[.\-]?(\d{1,2})\s*[-~到]\s*\d{1,2}[.\-]?\d{1,2}/);
+  if (match) {
+    const month = parseInt(match[1], 10);
+    const day = parseInt(match[2], 10);
+    if (validMonthDay(month, day)) return { month, day };
+  }
+  return null;
+}
+
 function extractDateFromContent(markdown) {
   const text = String(markdown || '').replace(/\r\n/g, '\n');
   const year = currentYear();
@@ -637,13 +644,16 @@ function isValidMeetingDate(month, day) {
   return meetingDate <= limit;
 }
 
-function extractMeetingDate(fileName, markdown = '', mtime = null) {
+function extractMeetingDate(fileName, markdown = '', mtime = null, ctime = null, folderName = null) {
   const fromFile = extractDateFromFileName(fileName);
   if (fromFile && isValidMeetingDate(fromFile.month, fromFile.day)) return fromFile;
   const fromContent = extractDateFromContent(markdown);
   if (fromContent && isValidMeetingDate(fromContent.month, fromContent.day)) return fromContent;
-  if (mtime) {
-    const d = new Date(mtime * 1000);
+  const fromFolder = extractDateFromFolderName(folderName);
+  if (fromFolder && isValidMeetingDate(fromFolder.month, fromFolder.day)) return fromFolder;
+  const ts = ctime || mtime;
+  if (ts) {
+    const d = new Date(ts * 1000);
     if (!isNaN(d.getTime())) return { month: d.getMonth() + 1, day: d.getDate() };
   }
   return null;
@@ -663,13 +673,13 @@ function meetingDateInRange(meetingDate, startDate, endDate) {
   return fileNum >= startNum || fileNum <= endNum;
 }
 
-function dateInRange(fileName, startDate, endDate, markdown = '', mtime = null) {
-  const fileDate = extractMeetingDate(fileName, markdown, mtime);
+function dateInRange(fileName, startDate, endDate, markdown = '', mtime = null, ctime = null, folderName = null) {
+  const fileDate = extractMeetingDate(fileName, markdown, mtime, ctime, folderName);
   return meetingDateInRange(fileDate, startDate, endDate);
 }
 
-function getWeekKey(fileName, markdown = '', meetingDate = null, mtime = null) {
-  const d = meetingDate || extractMeetingDate(fileName, markdown, mtime);
+function getWeekKey(fileName, markdown = '', meetingDate = null, mtime = null, ctime = null, folderName = null) {
+  const d = meetingDate || extractMeetingDate(fileName, markdown, mtime, ctime, folderName);
   if (!d) return 'unknown';
   const date = new Date(currentYear(), d.month - 1, d.day);
   const dayOfWeek = date.getDay();
@@ -734,18 +744,21 @@ function normalizeKdocsFile(item, driveId) {
     size: item.size,
     drive_id: item.drive_id || driveId || '',
     mtime: item.mtime,
-    parent_id: item.parent_id || ''
+    ctime: item.ctime,
+    parent_id: item.parent_id || '',
+    folderName: item.folderName || ''
   };
 }
 
-function scanFolder(driveId, folderId, startDate, endDate, teamName) {
+function scanFolder(driveId, folderId, startDate, endDate, teamName, _folderName = '') {
   const files = [];
   const items = listFolder(driveId, folderId, teamName);
   for (const item of items) {
     if (item.type === 'folder') {
-      files.push(...scanFolder(driveId, item.id, startDate, endDate, teamName));
+      files.push(...scanFolder(driveId, item.id, startDate, endDate, teamName, item.name));
     } else if (isKdocsDocument(item)) {
-      if (dateInRange(item.name, startDate, endDate)) {
+      if (dateInRange(item.name, startDate, endDate, '', null, null, _folderName)) {
+        item.folderName = _folderName;
         files.push(normalizeKdocsFile(item, driveId));
       }
     }
@@ -753,18 +766,19 @@ function scanFolder(driveId, folderId, startDate, endDate, teamName) {
   return files;
 }
 
-function scanFolderWithStats(driveId, folderId, startDate, endDate, teamName) {
+function scanFolderWithStats(driveId, folderId, startDate, endDate, teamName, _folderName = '') {
   const files = [];
   let totalScanned = 0;
   const items = listFolder(driveId, folderId, teamName);
   for (const item of items) {
     if (item.type === 'folder') {
-      const sub = scanFolderWithStats(driveId, item.id, startDate, endDate, teamName);
+      const sub = scanFolderWithStats(driveId, item.id, startDate, endDate, teamName, item.name);
       files.push(...sub.files);
       totalScanned += sub.totalScanned;
     } else if (isKdocsDocument(item)) {
       totalScanned++;
-      if (dateInRange(item.name, startDate, endDate)) {
+      if (dateInRange(item.name, startDate, endDate, '', null, null, _folderName)) {
+        item.folderName = _folderName;
         files.push(normalizeKdocsFile(item, driveId));
       }
     }
@@ -880,7 +894,7 @@ async function scanFilesByMode(entry, options) {
     }, teamName, pacer);
     return includeAll
       ? files
-      : files.filter(f => dateInRange(f.name, startDate, endDate));
+      : files.filter(f => dateInRange(f.name, startDate, endDate, '', null, null, f.folderName));
   }
 
   async function recursiveMatched() {
@@ -933,13 +947,69 @@ async function scanFilesByMode(entry, options) {
   return { files, stats };
 }
 
-function scanFolderAll(driveId, folderId, teamName) {
+async function scanAllTeams(config, startDate, endDate, pacer, options = {}) {
+  const { includeAll = true } = options;
+  const scanMode = getKdocsScanMode();
+  const allTeamsData = [];
+
+  for (let ti = 0; ti < config.teams.length; ti++) {
+    const teamCfg = config.teams[ti];
+    const allFiles = [];
+    let teamTotalScanned = 0;
+
+    const monthEntries = getTeamScanEntries(teamCfg);
+
+    try {
+      for (const entry of monthEntries) {
+        const { files, stats } = await scanFilesByMode(entry, {
+          teamName: teamCfg.name,
+          startDate,
+          endDate,
+          pacer,
+          mode: scanMode,
+          includeAll
+        });
+        files.forEach(f => f.sourceLabel = entry.label);
+        allFiles.push(...files);
+        teamTotalScanned += stats.totalScanned || files.length;
+        const supplement = stats.recursiveSupplementCount ? `，递归补 ${stats.recursiveSupplementCount}` : '';
+        console.log(`扫描 ${entry.label ? entry.label + ' ' : ''}${entry.monthName}: ${files.length}/${stats.totalScanned || files.length} 个文件匹配 [${stats.mode}; search ${stats.searchCount}; recursive ${stats.recursiveCount}${supplement}]`);
+      }
+    } catch (e) {
+      process.stderr.write(`[scanAllTeams] ${scanMode} 扫描失败 ${teamCfg.name}: ${e.message}\n`);
+      allFiles.length = 0;
+      teamTotalScanned = 0;
+      for (const entry of monthEntries) {
+        const { files, stats } = await scanFilesByMode(entry, {
+          teamName: teamCfg.name,
+          startDate,
+          endDate,
+          pacer,
+          mode: 'recursive',
+          includeAll
+        });
+        files.forEach(f => f.sourceLabel = entry.label);
+        allFiles.push(...files);
+        teamTotalScanned += stats.totalScanned || files.length;
+        console.log(`  fallback ${entry.label ? entry.label + ' ' : ''}${entry.monthName}: ${files.length}/${stats.totalScanned || files.length} 个文件匹配`);
+      }
+    }
+
+    const uniqueFiles = dedupeKdocsFiles(allFiles);
+    allTeamsData.push({ team: teamCfg.name, files: uniqueFiles, totalScanned: teamTotalScanned });
+  }
+
+  return allTeamsData;
+}
+
+function scanFolderAll(driveId, folderId, teamName, _folderName = '') {
   const files = [];
   const items = listFolder(driveId, folderId, teamName);
   for (const item of items) {
     if (item.type === 'folder') {
-      files.push(...scanFolderAll(driveId, item.id, teamName));
+      files.push(...scanFolderAll(driveId, item.id, teamName, item.name));
     } else if (isKdocsDocument(item)) {
+      item.folderName = _folderName;
       files.push(normalizeKdocsFile(item, driveId));
     }
   }
@@ -979,12 +1049,6 @@ function retryDelay(attempt) {
   return base + Math.floor(Math.random() * 1000);
 }
 
-function shouldUseCacheImmediately(parsedOrCode) {
-  const cfg = getKdocsConfig();
-  if (cfg.useCacheOnRateLimit === false) return false;
-  const code = typeof parsedOrCode === 'number' ? parsedOrCode : parsedOrCode && parsedOrCode.code;
-  return RATE_LIMIT_FREQUENCY.has(code) || RATE_LIMIT_QUOTA.has(code);
-}
 
 async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests', beforeSpawn = null) {
   if (!pacer) return spawnKdocsCli(args, inputJson, timeout);
@@ -1016,14 +1080,7 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
       ['drive', 'list-files', '--output', 'json'],
       inputJson,
       15000,
-      'list',
-      () => {
-        if (!pacer || typeof pacer.shouldPreferCache !== 'function' || !pacer.shouldPreferCache()) return null;
-        if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
-        if (!cached) return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: [] } } }) };
-        if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-        return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: cached.items } } }) };
-      }
+      'list'
     );
     if (error && !stdout) {
       if (attempt < MAX_RETRIES) {
@@ -1034,23 +1091,13 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
         continue;
       }
       process.stderr.write(`[listFolderAsync] failed folder=${parentId}: ${error.substring(0, 100)}\n`);
+      if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
       if (cached) return cached.items;
       return [];
     }
     try {
       const parsed = JSON.parse(stdout);
       if (parsed && parsed.code && parsed.code !== 0) {
-        if (shouldUseCacheImmediately(parsed)) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(0, classifyRateLimitCode(parsed.code));
-          if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
-          if (cached) {
-            if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-            process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, using cached folder data\n`);
-            return cached.items;
-          }
-          process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, no cache available\n`);
-          return [];
-        }
         if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
           if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(parsed.code));
           if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
@@ -1060,7 +1107,11 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
           continue;
         }
         process.stderr.write(`[listFolderAsync] API error folder=${parentId} code=${parsed.code}\n`);
-        if (cached) return cached.items;
+        if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+        if (cached) {
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          return cached.items;
+        }
         return [];
       }
       const items = (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
@@ -1074,64 +1125,66 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
         await sleep(delay);
         continue;
       }
+      if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
       if (cached) return cached.items;
       return [];
     }
   }
 
+  if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
   if (cached) return cached.items;
   return [];
 }
 
-async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, pacer) {
+async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, pacer, _folderName = '') {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
   const subFolders = items.filter(i => i.type === 'folder');
   const subResults = [];
   for (const sub of subFolders) {
-    subResults.push(await scanFolderAsync(driveId, sub.id, startDate, endDate, teamName, pacer));
+    subResults.push(await scanFolderAsync(driveId, sub.id, startDate, endDate, teamName, pacer, sub.name));
   }
   const files = items
-    .filter(i => isKdocsDocument(i) && dateInRange(i.name, startDate, endDate))
-    .map(i => normalizeKdocsFile(i, driveId));
+    .filter(i => isKdocsDocument(i) && dateInRange(i.name, startDate, endDate, '', null, null, _folderName))
+    .map(i => { i.folderName = _folderName; return normalizeKdocsFile(i, driveId); });
   return files.concat(subResults.flat());
 }
 
-async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, teamName, pacer) {
+async function scanFolderWithStatsAsync(driveId, folderId, startDate, endDate, teamName, pacer, _folderName = '') {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
   const subFolders = items.filter(i => i.type === 'folder');
   const subResults = [];
   for (const sub of subFolders) {
-    subResults.push(await scanFolderWithStatsAsync(driveId, sub.id, startDate, endDate, teamName, pacer));
+    subResults.push(await scanFolderWithStatsAsync(driveId, sub.id, startDate, endDate, teamName, pacer, sub.name));
   }
   const docFiles = items.filter(i => isKdocsDocument(i));
   const matchedFiles = docFiles
-    .filter(i => dateInRange(i.name, startDate, endDate))
-    .map(i => normalizeKdocsFile(i, driveId));
+    .filter(i => dateInRange(i.name, startDate, endDate, '', null, null, _folderName))
+    .map(i => { i.folderName = _folderName; return normalizeKdocsFile(i, driveId); });
   const files = matchedFiles.concat(subResults.flatMap(r => r.files));
   const totalScanned = docFiles.length + subResults.reduce((s, r) => s + r.totalScanned, 0);
   return { files, totalScanned };
 }
 
-async function scanFolderAllAsync(driveId, folderId, teamName, pacer) {
+async function scanFolderAllAsync(driveId, folderId, teamName, pacer, _folderName = '') {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
   const subFolders = items.filter(i => i.type === 'folder');
   const subResults = [];
   for (const sub of subFolders) {
-    subResults.push(await scanFolderAllAsync(driveId, sub.id, teamName, pacer));
+    subResults.push(await scanFolderAllAsync(driveId, sub.id, teamName, pacer, sub.name));
   }
   const files = items
     .filter(i => isKdocsDocument(i))
-    .map(i => normalizeKdocsFile(i, driveId));
+    .map(i => { i.folderName = _folderName; return normalizeKdocsFile(i, driveId); });
   return files.concat(subResults.flat());
 }
 
-async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, teamName, pacer) {
+async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, teamName, pacer, _folderName = '') {
   const startNum = startMonth * 100 + startDay;
   const items = await listFolderAsync(driveId, folderId, teamName, pacer);
   const subFolders = items.filter(i => i.type === 'folder');
   const subResults = [];
   for (const sub of subFolders) {
-    subResults.push(await scanFolderFromDateAsync(driveId, sub.id, startMonth, startDay, teamName, pacer));
+    subResults.push(await scanFolderFromDateAsync(driveId, sub.id, startMonth, startDay, teamName, pacer, sub.name));
   }
   const files = items
     .filter(i => {
@@ -1139,8 +1192,153 @@ async function scanFolderFromDateAsync(driveId, folderId, startMonth, startDay, 
       const d = extractDateFromFileName(i.name);
       return d && (d.month * 100 + d.day) >= startNum;
     })
-    .map(i => normalizeKdocsFile(i, driveId));
+    .map(i => { i.folderName = _folderName; return normalizeKdocsFile(i, driveId); });
   return files.concat(subResults.flat());
+}
+
+// ========== 文档内容读取（共享） ==========
+async function readDocOnceAsync(driveId, fileId, mtime, ctime, teamName, pacer, fileUrl, folderName) {
+  const cacheFile = path.join(teamDocsCacheDir(teamName), `${fileId}.json`);
+  const cached = readCache(cacheFile);
+  if (cached && cached.mtime === mtime) {
+    if (folderName && !cached.folderName) {
+      writeCache(cacheFile, { ...cached, folderName });
+    }
+    return cached.content;
+  }
+
+  if (pacer) await pacer.acquire();
+  return new Promise((resolve) => {
+    let released = false;
+    const release = () => {
+      if (!released && pacer) {
+        released = true;
+        pacer.release();
+      }
+    };
+    function extractContentFromReadFile(parsed) {
+      const data = (parsed && parsed.data && parsed.data.data) || (parsed && parsed.data) || {};
+      const content = data.content;
+      if (!content) return '';
+      if (typeof content === 'string') return content;
+      if (content.range_data) {
+        const cells = content.range_data.detail?.rangeData || [];
+        return cells.map(c => c.cellText || c.originalCellValue || '').filter(Boolean).join('\n');
+      }
+      return '';
+    }
+
+    const inputJson = JSON.stringify({ file_id: fileId });
+    if (pacer && typeof pacer.noteRequest === 'function') pacer.noteRequest('read');
+    const child = require('child_process').spawn(getKdocsCliPath(), getKdocsCliArgs(['drive', 'read-file', '--output', 'json']), {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: getKdocsCliEnv()
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => { child.kill(); }, 30000);
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      release();
+      if (code !== 0 || !stdout) {
+        if (stderr) process.stderr.write(`[readDoc] 失败 file=${fileId}: ${stderr.substring(0, 100)}\n`);
+        resolve(cached && cached.content ? cached.content : '');
+        return;
+      }
+      try {
+        const result = JSON.parse(stdout);
+        if (result && result.code && result.code !== 0) {
+          if (pacer && typeof pacer.noteRateLimit === 'function') {
+            const rlType = classifyRateLimitCode(result.code);
+            if (rlType === 'concurrency') {
+              pacer.noteRateLimit(undefined, 'concurrency');
+            } else if (rlType === 'quota') {
+              pacer.noteRateLimit(0, 'quota');
+            } else {
+              pacer.noteRateLimit(0);
+            }
+          }
+          process.stderr.write(`[readDoc] API error file=${fileId} code=${result.code}\n`);
+          if (cached && cached.content) {
+            process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+            resolve(cached.content);
+            return;
+          }
+          resolve('');
+          return;
+        }
+        const content = extractContentFromReadFile(result);
+        if (content) {
+          if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
+          writeCache(cacheFile, { content, mtime, ctime, url: fileUrl || '', folderName: folderName || '', fetched_at: Date.now() });
+        } else {
+          process.stderr.write(`[readDoc] 不支持的文件格式 file=${fileId} url=${fileUrl || ''}\n`);
+          writeCache(cacheFile, { content: '', mtime, ctime, url: fileUrl || '', folderName: folderName || '', fetched_at: Date.now(), unreadable: true });
+        }
+        resolve(content);
+      } catch (e) {
+        process.stderr.write(`[readDoc] JSON解析失败 file=${fileId}: ${e.message.substring(0, 80)}\n`);
+        if (cached && cached.content) {
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+          resolve(cached.content);
+          return;
+        }
+        resolve('');
+      }
+    });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      release();
+      process.stderr.write(`[readDoc] 启动失败 file=${fileId}: ${e.message.substring(0, 100)}\n`);
+      if (cached && cached.content) {
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+        process.stderr.write(`[readDoc] stale cache fallback file=${fileId}\n`);
+        resolve(cached.content);
+        return;
+      }
+      resolve('');
+    });
+    child.stdin.write(inputJson);
+    child.stdin.end();
+  });
+}
+
+async function readDocAsync(driveId, fileId, mtime, teamName, pacer, fileUrl, ctime, folderName) {
+  const maxAttempts = Number(getKdocsConfig().documentReadRetries) || 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const content = await readDocOnceAsync(driveId, fileId, mtime, ctime, teamName, pacer, fileUrl, folderName);
+    if (content || attempt === maxAttempts - 1) {
+      if (!content && pacer && typeof pacer.noteStaleCacheFallback === 'function') {
+        pacer.noteStaleCacheFallback();
+      }
+      return content;
+    }
+    if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
+    const delay = Math.min(3000 * Math.pow(2, attempt), 15000) + Math.floor(Math.random() * 500);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  return '';
+}
+
+async function runPool(tasks, concurrency) {
+  const results = new Array(tasks.length);
+  let idx = 0;
+
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++;
+      results[i] = await tasks[i]();
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, tasks.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
 }
 
 function dateToUnixSeconds(year, month, day) {
@@ -1279,12 +1477,6 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
   const cacheFile = path.join(teamFoldersCacheDir(teamName), `search_${cacheKey}.json`);
   const cached = readCache(cacheFile);
   if (cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) return cached.items;
-  if (pacer && typeof pacer.shouldPreferCache === 'function' && pacer.shouldPreferCache()) {
-    if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
-    if (!cached) return [];
-    if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-    return cached.items;
-  }
 
   const allItems = [];
   let pageToken = null;
@@ -1317,14 +1509,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
         ['drive', 'search-files', '--output', 'json'],
         JSON.stringify(inputObj),
         30000,
-        'search',
-        () => {
-          if (!pacer || typeof pacer.shouldPreferCache !== 'function' || !pacer.shouldPreferCache()) return null;
-          if (typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
-          if (!cached) return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: [] } } }) };
-          if (typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-          return { skipped: true, stdout: JSON.stringify({ code: 0, data: { data: { items: cached.items } } }) };
-        }
+        'search'
       );
 
         if (error && !stdout) {
@@ -1333,6 +1518,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
             await sleep(retryDelay(attempt));
             continue;
           }
+          if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
           if (cached) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
             process.stderr.write(`[searchFilesAsync] request failed after retries, using stale cache\n`);
@@ -1350,38 +1536,32 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
           await sleep(retryDelay(attempt));
           continue;
         }
+        if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
         throw new Error(`search-files JSON parse failed: ${e.message.substring(0, 100)}`);
       }
 
       if (parsed && parsed.code && parsed.code !== 0) {
         lastCode = parsed.code;
         if (RETRY_CODES.has(parsed.code)) {
-          const rlType = classifyRateLimitCode(parsed.code);
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(shouldUseCacheImmediately(parsed) ? 0 : undefined, rlType);
-          if (shouldUseCacheImmediately(parsed)) {
-            if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
-            if (cached) {
-              if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-              process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, using cached search data\n`);
-              return cached.items;
-            }
-            process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, no cache available\n`);
-            return [];
-          }
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(parsed.code));
           if (attempt < MAX_RETRIES) {
             if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
             await sleep(retryDelay(attempt));
             continue;
           }
+          if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
           if (cached) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
             process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code} after retries, using stale cache\n`);
             return cached.items;
           }
+          process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, no cache available\n`);
+          return [];
         }
         const msg = parsed.message || parsed.msg || parsed.error || '';
         const detail = parsed.detail || parsed.data?.message || parsed.data?.msg || '';
         const suffix = [msg, detail].filter(Boolean).join(' ');
+        if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
         throw new Error(`search-files API error code=${parsed.code}${suffix ? `: ${suffix.substring(0, 200)}` : ''}`);
       }
 
@@ -1400,6 +1580,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
     }
 
     if (!pageLoaded) {
+      if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
       if (cached) {
         if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
         process.stderr.write(`[searchFilesAsync] page failed${lastCode ? ` code=${lastCode}` : ''}, using stale cache\n`);
@@ -2273,16 +2454,17 @@ const docNumbering = {
 };
 
 // ========== 增量扫描（从指定日期开始） ==========
-function scanFolderFromDate(driveId, folderId, startMonth, startDay, teamName) {
+function scanFolderFromDate(driveId, folderId, startMonth, startDay, teamName, _folderName = '') {
   const files = [];
   const startNum = startMonth * 100 + startDay;
   const items = listFolder(driveId, folderId, teamName);
   for (const item of items) {
     if (item.type === 'folder') {
-      files.push(...scanFolderFromDate(driveId, item.id, startMonth, startDay, teamName));
+      files.push(...scanFolderFromDate(driveId, item.id, startMonth, startDay, teamName, item.name));
     } else if (isKdocsDocument(item)) {
       const d = extractDateFromFileName(item.name);
       if (d && (d.month * 100 + d.day) >= startNum) {
+        item.folderName = _folderName;
         files.push(normalizeKdocsFile(item, driveId));
       }
     }
@@ -3175,11 +3357,12 @@ module.exports = {
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
   docStyles, docNumbering, resolveWorkspaceDir, ensureOutputDir, outputPath, findInputFile, readInputJson, writeOutputJson,
   getBaselineFileName, createMeetingBaseline, writeMeetingBaseline, readMeetingBaseline,
-  currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, extractDateFromContent, extractMeetingDate, meetingDateInRange, dateInRange, getWeekKey,
+  currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, extractDateFromFolderName, extractDateFromContent, extractMeetingDate, meetingDateInRange, dateInRange, getWeekKey,
   listFolder, scanFolder, scanFolderWithStats, scanFolderAll, scanFolderFromDate,
   listFolderAsync, searchFilesAsync: searchFilesAsyncRateLimited, dateToUnixSeconds,
   scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
-  getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, dedupeKdocsFiles,
+  getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, scanAllTeams, dedupeKdocsFiles,
+  readDocOnceAsync, readDocAsync, runPool,
   RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, classifyRateLimitCode,
   formatGenerationMode, printAiReviewWarning,
   getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
