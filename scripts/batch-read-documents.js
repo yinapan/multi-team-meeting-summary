@@ -31,11 +31,13 @@ function writeRunDiagnostics(workspaceDir, pacer, failedDocuments, startedAt, wa
 async function main() {
   const args = process.argv.slice(2);
   if (!args[0] || !args[1]) {
-    console.error('用法: node batch-read-documents.js <start_date> <end_date>');
+    console.error('用法: node batch-read-documents.js <start_date> <end_date> [--warm-cache] [--resume]');
     console.error('示例: node batch-read-documents.js 03-10 04-30');
+    console.error('      node batch-read-documents.js 03-10 04-30 --resume   断点续传');
     process.exit(1);
   }
   const warmCacheOnly = args.includes('--warm-cache');
+  const resume = args.includes('--resume');
   const startDate = normalizeDate(args[0]);
   const endDate = normalizeDate(args[1]);
   const overallStartTime = Date.now();
@@ -49,7 +51,7 @@ async function main() {
   const failedDocuments = [];
   const pacer = new RequestPacer();
 
-  const scannedTeams = await scanAllTeams(config, startDate, endDate, pacer, { includeAll: true });
+  const scannedTeams = await scanAllTeams(config, startDate, endDate, pacer, { includeAll: true, resume });
 
   for (const scanned of scannedTeams) {
     const teamCfg = config.teams.find(t => t.name === scanned.team);

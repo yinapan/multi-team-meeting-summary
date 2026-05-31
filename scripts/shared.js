@@ -180,12 +180,18 @@ class RequestPacer {
       this.maxConcurrent = Math.max(1, Math.floor(this.maxConcurrent / 2));
       this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + (typeof cooldownMs === 'number' ? cooldownMs : 10000));
     } else {
+      // 429001 频率限制：间隔步进 + 冷却（默认用 rateLimitCooldownMs）
       this.currentIntervalMs = Math.min(this.adaptiveMaxIntervalMs, this.currentIntervalMs + this.adaptiveStepMs);
-      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + (typeof cooldownMs === 'number' ? cooldownMs : this.rateLimitCooldownMs));
+      const baseCooldown = typeof cooldownMs === 'number' ? cooldownMs : this.rateLimitCooldownMs;
+      // 连续频率限流时冷却翻倍（最多 5 分钟）
+      this._freqStrikes = (this._freqStrikes || 0) + 1;
+      const strikeMultiplier = Math.min(Math.pow(2, this._freqStrikes - 1), 5);
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + baseCooldown * strikeMultiplier);
     }
   }
 
   noteSuccess() {
+    this._freqStrikes = 0;
     if (this.currentIntervalMs > this.minIntervalMs) {
       this.successSinceRateLimit++;
       if (this.successSinceRateLimit >= this.recoverySuccesses) {
@@ -1019,13 +1025,49 @@ async function scanFilesByMode(entry, options) {
   return { files, stats };
 }
 
+function getCheckpointFile(startDate, endDate) {
+  return outputPath(`batch-read-checkpoint-${startDate}-${endDate}.json`);
+}
+
+function readCheckpoint(startDate, endDate) {
+  try {
+    const f = getCheckpointFile(startDate, endDate);
+    if (!fs.existsSync(f)) return null;
+    const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    if (data && Array.isArray(data.completedTeams)) return data;
+    return null;
+  } catch (e) { return null; }
+}
+
+function writeCheckpoint(startDate, endDate, completedTeams, lastTeam) {
+  writeOutputJson(`batch-read-checkpoint-${startDate}-${endDate}.json`, {
+    startDate,
+    endDate,
+    completedTeams,
+    lastTeam,
+    updatedAt: new Date().toISOString()
+  });
+}
+
 async function scanAllTeams(config, startDate, endDate, pacer, options = {}) {
-  const { includeAll = true } = options;
+  const { includeAll = true, resume = false } = options;
   const scanMode = getKdocsScanMode();
   const allTeamsData = [];
 
+  // 断点续传：跳过已完成团队
+  const checkpoint = resume ? readCheckpoint(startDate, endDate) : null;
+  const completedSet = new Set(checkpoint ? checkpoint.completedTeams : []);
+  if (checkpoint) {
+    console.log(`[scanAllTeams] 断点续传: 已完成 ${checkpoint.completedTeams.length} 个团队，从 ${checkpoint.lastTeam || '?'} 之后继续`);
+  }
+
   for (let ti = 0; ti < config.teams.length; ti++) {
     const teamCfg = config.teams[ti];
+    if (completedSet.has(teamCfg.name)) {
+      console.log(`[scanAllTeams] 跳过已完成: ${teamCfg.name}`);
+      continue;
+    }
+
     const allFiles = [];
     let teamTotalScanned = 0;
 
@@ -1069,6 +1111,29 @@ async function scanAllTeams(config, startDate, endDate, pacer, options = {}) {
 
     const uniqueFiles = dedupeKdocsFiles(allFiles);
     allTeamsData.push({ team: teamCfg.name, files: uniqueFiles, totalScanned: teamTotalScanned });
+
+    // 每完成一个团队写断点
+    if (resume) {
+      completedSet.add(teamCfg.name);
+      writeCheckpoint(startDate, endDate, [...completedSet], teamCfg.name);
+    }
+
+    // 每处理 N 个团队后暂停，给 KDocs 速率限制桶回血
+    const TEAM_BATCH_SIZE = Number(getKdocsConfig().teamBatchSize) || 3;
+    const INTER_BATCH_PAUSE_MS = Math.min(
+      Number(getKdocsConfig().interBatchPauseMs) || 60000,
+      60000
+    );
+    const processedCount = allTeamsData.length + (checkpoint ? checkpoint.completedTeams.length : 0);
+    if (processedCount % TEAM_BATCH_SIZE === 0 && ti + 1 < config.teams.length) {
+      console.log(`\n[scanAllTeams] 已完成 ${processedCount}/${config.teams.length} 个团队，暂停 ${(INTER_BATCH_PAUSE_MS / 1000).toFixed(0)}s ...`);
+      await sleep(INTER_BATCH_PAUSE_MS);
+    }
+  }
+
+  // 全部完成后清理断点文件
+  if (resume) {
+    try { fs.unlinkSync(getCheckpointFile(startDate, endDate)); } catch (e) { /* ok */ }
   }
 
   return allTeamsData;
