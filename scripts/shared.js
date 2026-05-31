@@ -1091,7 +1091,7 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
         continue;
       }
       process.stderr.write(`[listFolderAsync] failed folder=${parentId}: ${error.substring(0, 100)}\n`);
-      if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+      if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
       if (cached) return cached.items;
       return [];
     }
@@ -1107,7 +1107,7 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
           continue;
         }
         process.stderr.write(`[listFolderAsync] API error folder=${parentId} code=${parsed.code}\n`);
-        if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
         if (cached) {
           if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
           return cached.items;
@@ -1125,13 +1125,13 @@ async function listFolderAsync(driveId, parentId, teamName, pacer) {
         await sleep(delay);
         continue;
       }
-      if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+      if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
       if (cached) return cached.items;
       return [];
     }
   }
 
-  if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-folder-cache');
+  if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
   if (cached) return cached.items;
   return [];
 }
@@ -1518,7 +1518,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
             await sleep(retryDelay(attempt));
             continue;
           }
-          if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
           if (cached) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
             process.stderr.write(`[searchFilesAsync] request failed after retries, using stale cache\n`);
@@ -1536,7 +1536,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
           await sleep(retryDelay(attempt));
           continue;
         }
-        if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
         throw new Error(`search-files JSON parse failed: ${e.message.substring(0, 100)}`);
       }
 
@@ -1549,7 +1549,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
             await sleep(retryDelay(attempt));
             continue;
           }
-          if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
           if (cached) {
             if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
             process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code} after retries, using stale cache\n`);
@@ -1561,7 +1561,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
         const msg = parsed.message || parsed.msg || parsed.error || '';
         const detail = parsed.detail || parsed.data?.message || parsed.data?.msg || '';
         const suffix = [msg, detail].filter(Boolean).join(' ');
-        if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
         throw new Error(`search-files API error code=${parsed.code}${suffix ? `: ${suffix.substring(0, 200)}` : ''}`);
       }
 
@@ -1580,7 +1580,7 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
     }
 
     if (!pageLoaded) {
-      if (pacer && typeof pacer.noteCacheRebuild === 'function') pacer.noteCacheRebuild('rate-limit-search-cache');
+      if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
       if (cached) {
         if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
         process.stderr.write(`[searchFilesAsync] page failed${lastCode ? ` code=${lastCode}` : ''}, using stale cache\n`);
