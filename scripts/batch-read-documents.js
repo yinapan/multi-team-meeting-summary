@@ -82,7 +82,7 @@ async function main() {
         if (pacer && typeof pacer.noteApiFetch === 'function') pacer.noteApiFetch();
       }
 
-      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer, f.link || '', f.ctime, f.folderName).then(md => {
+      return readDocAsync(f.drive_id, f.id, f.mtime, teamCfg.name, pacer, f.link || '', f.ctime, f.folderName, f.folderPath || f.folderName).then(md => {
         f._readContent = md || '';
         if (!md) {
           failedDocuments.push({

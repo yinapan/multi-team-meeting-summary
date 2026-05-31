@@ -4,7 +4,7 @@ const path = require('path');
 const {
   resolveWorkspaceDir, currentYear, searchFilesAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeTitle, normalizeForMatch, charSimilarity, getTeamScanEntries,
-  RequestPacer, extractParticipants, teamDocsCacheDir, readCache, getKdocsScanMode, scanFilesByMode, scanAllTeams,
+  RequestPacer, extractParticipants, teamDocsCacheDir, teamTreeCacheDir, readCache, getKdocsScanMode, scanFilesByMode, scanAllTeams,
   outputPath, findInputFile, writeOutputJson, readDocAsync, runPool
 } = require('./shared');
 
@@ -777,19 +777,38 @@ function applyCachedImportantRecord(importantMap, teamCfg, file, importantPeople
 }
 
 function buildCachedFileMetaIndex(teamName) {
-  const foldersDir = path.join(path.dirname(teamDocsCacheDir(teamName)), 'folders');
   const index = new Map();
-  if (!fs.existsSync(foldersDir)) return index;
-  for (const fileName of fs.readdirSync(foldersDir)) {
-    if (!fileName.endsWith('.json')) continue;
-    const cached = readCache(path.join(foldersDir, fileName));
-    for (const item of cached?.items || []) {
-      if (!item || item.type !== 'file' || !item.id) continue;
-      index.set(item.id, {
-        id: item.id,
-        name: item.name || '',
-        url: item.link_url || item.link || ''
-      });
+  const treeDir = teamTreeCacheDir(teamName);
+
+  function walk(dir) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir)) {
+      const fp = path.join(dir, entry);
+      if (fs.statSync(fp).isDirectory()) {
+        walk(fp);
+      } else if (entry === '_folder.json') {
+        const c = readCache(fp);
+        for (const item of c?.items || []) {
+          if (item && item.type === 'file' && item.id)
+            index.set(item.id, { id: item.id, name: item.name || '', url: item.link_url || item.link || '' });
+        }
+      }
+    }
+  }
+  walk(treeDir);
+
+  // 兜底：读取扁平 folders/
+  if (index.size === 0) {
+    const foldersDir = path.join(path.dirname(teamDocsCacheDir(teamName)), 'folders');
+    if (fs.existsSync(foldersDir)) {
+      for (const fileName of fs.readdirSync(foldersDir)) {
+        if (!fileName.endsWith('.json')) continue;
+        const cached = readCache(path.join(foldersDir, fileName));
+        for (const item of cached?.items || []) {
+          if (!item || item.type !== 'file' || !item.id) continue;
+          index.set(item.id, { id: item.id, name: item.name || '', url: item.link_url || item.link || '' });
+        }
+      }
     }
   }
   return index;
@@ -798,28 +817,61 @@ function buildCachedFileMetaIndex(teamName) {
 function buildImportantSetFromDocCache(workspaceDir, config, importantPeople, teamLeaders) {
   const importantMap = new Map();
   for (const teamCfg of config?.teams || []) {
-    const docsDir = teamDocsCacheDir(teamCfg.name);
-    if (!fs.existsSync(docsDir)) continue;
+    const treeDir = teamTreeCacheDir(teamCfg.name);
     const fileMetaIndex = buildCachedFileMetaIndex(teamCfg.name);
-    for (const fileName of fs.readdirSync(docsDir)) {
-      if (!fileName.endsWith('.json')) continue;
-      const cached = readCache(path.join(docsDir, fileName));
-      if (!cached || !cached.content) continue;
-      const participants = extractParticipants(cached.content);
-      const leader = (teamLeaders || {})[teamCfg.name] || null;
-      const level = classifyImportantByParticipants(participants, importantPeople, leader);
-      if (!level) continue;
-      const firstLine = String(cached.content || '').split(/\r?\n/).find(line => line.trim()) || '';
-      const docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim();
-      const id = fileName.replace(/\.json$/i, '');
-      const meta = fileMetaIndex.get(id) || {};
-      setImportantLevel(importantMap, importantKeysForMeeting({
-        id,
-        name: meta.name || docTitle,
-        title: docTitle,
-        text: docTitle,
-        url: cached.url || meta.url || ''
-      }), level);
+
+    function walk(dir) {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir)) {
+        const fp = path.join(dir, entry);
+        if (fs.statSync(fp).isDirectory()) {
+          walk(fp);
+        } else if (entry.endsWith('.json') && entry !== '_folder.json') {
+          const cached = readCache(fp);
+          if (!cached || !cached.content) continue;
+          const participants = extractParticipants(cached.content);
+          const leader = (teamLeaders || {})[teamCfg.name] || null;
+          const level = classifyImportantByParticipants(participants, importantPeople, leader);
+          if (!level) continue;
+          const firstLine = String(cached.content || '').split(/\r?\n/).find(line => line.trim()) || '';
+          const docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim();
+          const id = entry.replace(/\.json$/i, '');
+          const meta = fileMetaIndex.get(id) || {};
+          setImportantLevel(importantMap, importantKeysForMeeting({
+            id,
+            name: meta.name || docTitle,
+            title: docTitle,
+            text: docTitle,
+            url: cached.url || meta.url || ''
+          }), level);
+        }
+      }
+    }
+    walk(treeDir);
+
+    // 兜底：遍历扁平 docs/
+    const docsDir = teamDocsCacheDir(teamCfg.name);
+    if (fs.existsSync(docsDir)) {
+      for (const fileName of fs.readdirSync(docsDir)) {
+        if (!fileName.endsWith('.json')) continue;
+        const cached = readCache(path.join(docsDir, fileName));
+        if (!cached || !cached.content) continue;
+        const participants = extractParticipants(cached.content);
+        const leader = (teamLeaders || {})[teamCfg.name] || null;
+        const level = classifyImportantByParticipants(participants, importantPeople, leader);
+        if (!level) continue;
+        const firstLine = String(cached.content || '').split(/\r?\n/).find(line => line.trim()) || '';
+        const docTitle = firstLine.replace(/^[#\s《]+|[》\s]+$/g, '').trim();
+        const id = fileName.replace(/\.json$/i, '');
+        const meta = fileMetaIndex.get(id) || {};
+        setImportantLevel(importantMap, importantKeysForMeeting({
+          id,
+          name: meta.name || docTitle,
+          title: docTitle,
+          text: docTitle,
+          url: cached.url || meta.url || ''
+        }), level);
+      }
     }
   }
   return importantMap;
@@ -827,20 +879,68 @@ function buildImportantSetFromDocCache(workspaceDir, config, importantPeople, te
 
 function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
   const teams = [];
+
+  // 遍历树形缓存，收集所有文档缓存（entry: { cached, id, url, folderName, folderPath }）
+  function collectDocCaches(teamName) {
+    const results = [];
+    const treeDir = teamTreeCacheDir(teamName);
+
+    function walk(dir, folderPathFromDir) {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir)) {
+        const fp = path.join(dir, entry);
+        if (fs.statSync(fp).isDirectory()) {
+          const subPath = folderPathFromDir ? `${folderPathFromDir}/${entry}` : entry;
+          walk(fp, subPath);
+        } else if (entry.endsWith('.json') && entry !== '_folder.json') {
+          const cached = readCache(fp);
+          if (!cached) continue;
+          const id = entry.replace(/\.json$/i, '');
+          results.push({
+            cached,
+            id,
+            url: cached.url || '',
+            folderName: cached.folderName || '',
+            folderPath: cached.folderPath || folderPathFromDir || ''
+          });
+        }
+      }
+    }
+    walk(treeDir, '');
+
+    // 兜底：遍历扁平 docs/
+    if (results.length === 0) {
+      const docsDir = teamDocsCacheDir(teamName);
+      if (fs.existsSync(docsDir)) {
+        for (const fileName of fs.readdirSync(docsDir)) {
+          if (!fileName.endsWith('.json')) continue;
+          const cached = readCache(path.join(docsDir, fileName));
+          if (!cached) continue;
+          const id = fileName.replace(/\.json$/i, '');
+          results.push({
+            cached,
+            id,
+            url: cached.url || '',
+            folderName: cached.folderName || '',
+            folderPath: cached.folderPath || ''
+          });
+        }
+      }
+    }
+    return results;
+  }
+
   for (const teamCfg of config?.teams || []) {
-    const docsDir = teamDocsCacheDir(teamCfg.name);
     const weekMap = {};
-    if (!fs.existsSync(docsDir)) {
+    const fileMetaIndex = buildCachedFileMetaIndex(teamCfg.name);
+    const docCaches = collectDocCaches(teamCfg.name);
+
+    if (docCaches.length === 0) {
       teams.push({ name: teamCfg.name, weeks: weekMap });
       continue;
     }
 
-    const fileMetaIndex = buildCachedFileMetaIndex(teamCfg.name);
-    for (const fileName of fs.readdirSync(docsDir)) {
-      if (!fileName.endsWith('.json')) continue;
-      const cached = readCache(path.join(docsDir, fileName));
-      if (!cached) continue;
-      const id = fileName.replace(/\.json$/i, '');
+    for (const { cached, id, url: cachedUrl, folderName, folderPath } of docCaches) {
       const meta = fileMetaIndex.get(id) || {};
 
       let docTitle;
@@ -853,7 +953,11 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
         continue;
       }
 
-      let resolvedDate = extractMeetingDate(docTitle, cached.content || '', null, cached.ctime, cached.folderName);
+      const folderNameForDate = folderName || leafFolderName(folderPath);
+      let resolvedDate = extractMeetingDate(docTitle, cached.content || '', null, cached.ctime, folderNameForDate);
+      if (!resolvedDate && folderPath) {
+        resolvedDate = extractMeetingDate(docTitle, cached.content || '', null, null, folderPath);
+      }
       if (!resolvedDate && (cached.ctime || cached.mtime)) {
         const ts = cached.ctime || cached.mtime;
         if (!isNaN(new Date(ts * 1000).getTime())) {
@@ -874,7 +978,7 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
 
       if (!weekMap[weekKey]) weekMap[weekKey] = [];
       const title = normalizeTitle(docTitle, resolvedDate);
-      const url = cached.url || meta.url || '';
+      const url = cachedUrl || meta.url || '';
       const isDup = weekMap[weekKey].some(m =>
         (url && m.url && normalizeKdocsUrl(m.url) === normalizeKdocsUrl(url)) || m.text === title
       );
@@ -889,6 +993,12 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
   }
 
   return { teams, lastUpdate: new Date().toISOString().slice(0, 10) };
+}
+
+// 从完整路径提取叶子文件夹名（generate-kanban.js 本地使用）
+function leafFolderName(folderPath) {
+  if (!folderPath) return '';
+  return folderPath.split('/').pop() || '';
 }
 
 function enrichKanbanFromDocCache(kanbanData, cacheData) {
