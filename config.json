@@ -428,8 +428,8 @@
     "recoverySuccesses": 5,
     "documentConcurrency": 3,
     "documentReadRetries": 2,
-    "teamBatchSize": 5,
-    "interBatchPauseMs": 30000,
+    "teamBatchSize": 99,
+    "interBatchPauseMs": 0,
     "useSearch": true
   },
   "report": {
