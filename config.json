@@ -419,8 +419,8 @@
   ],
   "kdocs": {
     "token": "8tirAHy1Bc8uBUntMFJX4gX5j/I7sxcfqn5y5EzaZ6AVZHgQDeZJrOsnov+OfUhAfEbCY0VaUulhm6LLecrhOe2G4NX42+4t3o4z79/+UfD2M0pzpeAWJjyjuhb44ebeOwpjpC0c5CENi7/wRKB+ZsBCU1kDgvorgafsEBqZPka5MTZlK7rcKUQjHRhWntOm6G8mxjzseXOc9+mxFA==",
-    "cacheTtlMs": 3600000,
-    "folderConcurrency": 1,
+    "cacheTtlMs": 86400000,
+    "folderConcurrency": 2,
     "minIntervalMs": 3000,
     "rateLimitCooldownMs": 60000,
     "adaptiveMaxIntervalMs": 30000,

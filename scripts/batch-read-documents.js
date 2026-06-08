@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, teamDocsCacheDir, ensureCacheDir, readCache, scanAllTeams, RequestPacer, extractInfo, getKdocsConfig, outputPath, writeOutputJson, writeMeetingBaseline, readDocAsync, runPool } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, teamDocsCacheDir, treeDocCacheFile, ensureCacheDir, readCache, scanAllTeams, RequestPacer, extractInfo, getKdocsConfig, outputPath, writeOutputJson, writeMeetingBaseline, readDocAsync, runPool } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
@@ -72,9 +72,25 @@ async function main() {
     let cacheHit = 0, apiFetch = 0;
     const startTime = Date.now();
 
-    const tasks = allFiles.map((f, i) => () => {
-      const cacheFile = path.join(teamDocsCacheDir(teamCfg.name), `${f.id}.json`);
-      const cached = readCache(cacheFile);
+    // 预过滤：文件名日期明确超出范围且 folderName 也无匹配日期 → 跳过 API 读取
+    const preFilteredOut = [];
+    const preFilteredFiles = allFiles.filter(f => {
+      if (dateInRange(f.name, startDate, endDate, '', null, null, f.folderName)) return true;
+      preFilteredOut.push(f);
+      return false;
+    });
+    if (preFilteredOut.length > 0) {
+      console.log(`  预过滤: ${allFiles.length} → ${preFilteredFiles.length} 篇 (跳过 ${preFilteredOut.length} 篇明显超出范围的文档，节省 API 调用)`);
+    }
+
+    const tasks = preFilteredFiles.map((f, i) => () => {
+      // 树形缓存优先，扁平兜底
+      const cacheFile = (f.folderPath || f.folderName)
+        ? treeDocCacheFile(teamCfg.name, f.folderPath || f.folderName, f.id)
+        : path.join(teamDocsCacheDir(teamCfg.name), `${f.id}.json`);
+      const flatFile = path.join(teamDocsCacheDir(teamCfg.name), `${f.id}.json`);
+      let cached = readCache(cacheFile);
+      if (!cached) cached = readCache(flatFile);
       const isCached = cached && cached.mtime === f.mtime;
       if (isCached) {
         cacheHit++;
@@ -111,8 +127,8 @@ async function main() {
         info.ctime = f.ctime || null;
         info.folderName = f.folderName || null;
         const num = i + 1;
-        if (num % 5 === 0 || num === allFiles.length) {
-          process.stdout.write(`  进度: ${num}/${allFiles.length}\r`);
+        if (num % 5 === 0 || num === preFilteredFiles.length) {
+          process.stdout.write(`  进度: ${num}/${preFilteredFiles.length}\r`);
         }
         return info;
       });
@@ -155,7 +171,7 @@ async function main() {
       .map(f => ({ name: f.name, id: f.id, url: f.link || '', sourceLabel: f.sourceLabel || null, unreadable: true, folderName: f.folderName || null, ctime: f.ctime || null }));
     const excludedMeetings = allFiles
       .filter(f => !meetingListItems.some(item => item.id === f.id) && !failedKeys.has(f.id))
-      .map(f => ({ name: f.name, id: f.id, url: f.link || '', reason: 'out_of_date_range_after_content_check' }));
+      .map(f => ({ name: f.name, id: f.id, url: f.link || '', reason: preFilteredOut.some(p => p.id === f.id) ? 'pre_filtered_out_of_date_range' : 'out_of_date_range_after_content_check' }));
     const diagnosticExcludedMeetings = excludedMeetings.slice(0, 50);
     const unreadableMeetings = allFiles
       .filter(f => failedKeys.has(f.id))
