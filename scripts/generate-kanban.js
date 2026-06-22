@@ -1254,7 +1254,11 @@ function applyImportantMarkersToKanbanData(kanbanData, importantMap, options = {
   for (const team of kanbanData.teams || []) {
     for (const meetings of Object.values(team.weeks || {})) {
       for (const meeting of meetings) {
-        const level = isImportantMeeting(meeting.url, meeting.title || meeting.text, importantMap);
+        let level = isImportantMeeting(meeting.url, meeting.title, importantMap);
+        if (!level || level !== 'red') {
+          const altLevel = isImportantMeeting(meeting.url, meeting.text, importantMap);
+          if (altLevel === 'red' || (!level && altLevel)) level = altLevel;
+        }
         if (level || clearMissing) {
           meeting.important = level;
         }
