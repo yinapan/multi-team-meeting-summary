@@ -39,6 +39,10 @@ function kanbanOutputName(fileName, dateRange) {
   return `${base}-${dateRange.startLabel}-${dateRange.endLabel}${ext}`;
 }
 
+function displayTitleForMeeting(rawTitle) {
+  return String(rawTitle || '').replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, '');
+}
+
 function buildKanbanDataFromTeamSummaries(teamSummaries, importantMap = new Map()) {
   const teams = (teamSummaries || []).map(teamSummary => {
     const weeks = {};
@@ -49,6 +53,7 @@ function buildKanbanDataFromTeamSummaries(teamSummaries, importantMap = new Map(
         const url = meeting.url || meeting.link || '';
         return {
           text: normalizeTitle(rawTitle, meeting.meetingDate || null),
+          title: displayTitleForMeeting(rawTitle),
           url,
           important: meeting.important || isImportantMeeting(url, rawTitle, importantMap)
         };
@@ -540,6 +545,9 @@ function highlightText(t, q) {
 function parseDate(t) { const m = t.match(/^(\\d{4})(\\d{2})(\\d{2})/); return m ? m[2] + '/' + m[3] : ''; }
 function parseName(t) { return t.replace(/^\\d{8}\\s*[-—–]\\s*/, ''); }
 
+function displayTitle(m) { return m.title || parseName(m.text || ''); }
+function searchText(m) { return ((m.title || '') + ' ' + (m.text || '')).toLowerCase(); }
+
 function allMeetings() {
   return data.flatMap(row => weekKeys.flatMap(w => (row.weeks[w] || []).map(m => ({ ...m, team: row.name, week: w }))));
 }
@@ -650,7 +658,7 @@ function isVisible(row, weekKey, meeting) {
   if (state.filter === 'orange' && meeting.important !== 'orange') return false;
   if (state.filter === 'recent' && !getRecentWeeks().includes(weekKey)) return false;
   if (state.query) {
-    const hay = (row.name + ' ' + meeting.text).toLowerCase();
+    const hay = (row.name + ' ' + searchText(meeting)).toLowerCase();
     if (!hay.includes(state.query)) return false;
   }
   return true;
@@ -691,7 +699,7 @@ function renderMeetingList(meetings) {
   const q = state.query;
   const items = sorted.map(m => {
     const d = parseDate(m.text);
-    const n = parseName(m.text);
+    const n = displayTitle(m);
     const cls = m.important === 'red' ? 'meeting important' : m.important === 'orange' ? 'meeting important-orange' : 'meeting';
     const flag = m.important === 'red' ? '<span class="title-flag matrix-title-flag status-important">红色重要</span><span class="title-separator">-</span>'
       : m.important === 'orange' ? '<span class="title-flag matrix-title-flag status-important-orange">橙色重要</span><span class="title-separator">-</span>' : '';
@@ -1081,6 +1089,7 @@ function buildKanbanDataFromDocCache(workspaceDir, config, importantMap) {
       if (isDup) continue;
       weekMap[weekKey].push({
         text: title,
+        title: displayTitleForMeeting(docTitle),
         url,
         important: isImportantMeeting(url, docTitle, importantMap)
       });
@@ -1138,6 +1147,9 @@ function enrichKanbanFromDocCache(kanbanData, cacheData) {
         // 精确匹配：更新文本、补充标记、必要时跨周移动
         if (cacheMeeting.text && /^\d{8}\s+-\s+/.test(cacheMeeting.text)) {
           match.meeting.text = cacheMeeting.text;
+        }
+        if (cacheMeeting.title && !match.meeting.title) {
+          match.meeting.title = cacheMeeting.title;
         }
         if (cacheMeeting.important && (cacheMeeting.important === 'red' || !match.meeting.important)) {
           match.meeting.important = cacheMeeting.important;
@@ -1233,7 +1245,7 @@ function applyImportantMarkersToKanbanData(kanbanData, importantMap, options = {
   for (const team of kanbanData.teams || []) {
     for (const meetings of Object.values(team.weeks || {})) {
       for (const meeting of meetings) {
-        const level = isImportantMeeting(meeting.url, meeting.text, importantMap);
+        const level = isImportantMeeting(meeting.url, meeting.title || meeting.text, importantMap);
         if (level || clearMissing) {
           meeting.important = level;
         }
@@ -1484,6 +1496,7 @@ async function fullScan(config, importantMap, forceRefresh = false) {
       weekTitleIndex[weekKey].set(dedupKey, weekMap[weekKey].length);
       weekMap[weekKey].push({
         text: title,
+        title: displayTitleForMeeting(f.name),
         url,
         important: isImportantMeeting(url, f.name, importantMap)
       });
@@ -1578,6 +1591,7 @@ async function incrementalScan(config, existingData, importantMap) {
 
         existingTeam.weeks[weekKey].push({
           text: title,
+          title: displayTitleForMeeting(f.name),
           url,
           important: isImportantMeeting(url, f.name, importantMap)
         });

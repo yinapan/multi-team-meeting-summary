@@ -69,6 +69,11 @@ assert.strictEqual(
   `${new Date().getFullYear()}0610 - 0610 Range Meeting`,
   'date-range kanban should be built only from batch-read team summaries'
 );
+assert.strictEqual(
+  rangeKanban.teams[0].weeks['0608-0614'][0].title,
+  '0610 Range Meeting',
+  'date-range kanban should preserve the original meeting title for display'
+);
 assert.strictEqual(rangeKanban.teams[0].weeks['0608-0614'][0].important, 'orange');
 
 assert.strictEqual(
@@ -247,6 +252,31 @@ assert.ok(
 assert.ok(
   crossYearHtml.includes('"1229-0104":{"label":"2025/12/29 - 2026/1/4"'),
   'cross-year week label should include years to avoid looking like December 2026'
+);
+const originalTitleHtml = generateHtml({
+  lastUpdate: '2026-06-22',
+  teams: [
+    {
+      name: 'OriginalTitleTeam',
+      weeks: {
+        '0330-0405': [
+          {
+            text: '20260403 - cleaned title',
+            title: '20260403号引擎周会.otl',
+            url: ''
+          }
+        ]
+      }
+    }
+  ]
+});
+assert.ok(
+  originalTitleHtml.includes('20260403号引擎周会.otl'),
+  'kanban HTML should display the original meeting title when available'
+);
+assert.ok(
+  originalTitleHtml.includes('const n = displayTitle(m);'),
+  'kanban HTML should render meeting titles from the original title field when available'
 );
 assert.ok(
   /\.meeting\s*\{[^}]*grid-template-columns:\s*46px minmax\(0,\s*1fr\);/s.test(legendHtml),
