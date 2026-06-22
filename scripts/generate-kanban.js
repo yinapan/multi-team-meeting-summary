@@ -1,9 +1,10 @@
 // 看板默认使用7天长缓存，避免频繁API调用触发限流；--refresh 强制刷新
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const {
   resolveWorkspaceDir, currentYear, searchFilesAsync, scanFolderAllAsync, scanFolderFromDateAsync,
-  extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeTitle, normalizeForMatch, charSimilarity, getTeamScanEntries,
+  extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeDate, normalizeTitle, normalizeForMatch, charSimilarity, getTeamScanEntries,
   RequestPacer, extractParticipants, teamDocsCacheDir, teamTreeCacheDir, readCache, getKdocsScanMode, scanFilesByMode, scanAllTeams,
   outputPath, findInputFile, writeOutputJson, readDocAsync, runPool
 } = require('./shared');
@@ -12,6 +13,105 @@ const DATA_FILE = '会议看板-data.json';
 const HTML_FILE = '会议看板.html';
 
 // ========== 生成 HTML ==========
+function parseKanbanDateRange(args = []) {
+  const positional = args.filter(arg => !String(arg).startsWith('--'));
+  if (positional.length < 2) return null;
+  const toMonthDay = (value) => {
+    const raw = String(value || '').trim();
+    if (/^\d{4}$/.test(raw)) return `${raw.slice(0, 2)}-${raw.slice(2, 4)}`;
+    return normalizeDate(raw);
+  };
+  const startDate = toMonthDay(positional[0]);
+  const endDate = toMonthDay(positional[1]);
+  if (!/^\d{2}-\d{2}$/.test(startDate) || !/^\d{2}-\d{2}$/.test(endDate)) return null;
+  return {
+    startDate,
+    endDate,
+    startLabel: startDate.replace('-', ''),
+    endLabel: endDate.replace('-', '')
+  };
+}
+
+function kanbanOutputName(fileName, dateRange) {
+  if (!dateRange) return fileName;
+  const ext = path.extname(fileName);
+  const base = fileName.slice(0, -ext.length);
+  return `${base}-${dateRange.startLabel}-${dateRange.endLabel}${ext}`;
+}
+
+function buildKanbanDataFromTeamSummaries(teamSummaries, importantMap = new Map()) {
+  const teams = (teamSummaries || []).map(teamSummary => {
+    const weeks = {};
+    for (const [weekKey, weekValue] of Object.entries(teamSummary.weeks || {})) {
+      const meetings = Array.isArray(weekValue) ? weekValue : (weekValue.meetings || []);
+      weeks[weekKey] = meetings.map(meeting => {
+        const rawTitle = meeting.title || meeting.name || meeting.text || '';
+        const url = meeting.url || meeting.link || '';
+        return {
+          text: normalizeTitle(rawTitle, meeting.meetingDate || null),
+          url,
+          important: meeting.important || isImportantMeeting(url, rawTitle, importantMap)
+        };
+      });
+    }
+    return { name: teamSummary.team || teamSummary.name || '', weeks };
+  });
+  return {
+    teams,
+    lastUpdate: new Date().toISOString().slice(0, 10)
+  };
+}
+
+function runBatchReadForDateRange(dateRange) {
+  const script = path.join(__dirname, 'batch-read-documents.js');
+  execFileSync(process.execPath, [script, dateRange.startDate, dateRange.endDate], {
+    cwd: path.join(__dirname, '..'),
+    stdio: 'inherit'
+  });
+}
+
+function parseWeekKey(weekKey) {
+  const match = String(weekKey || '').match(/^(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+  if (!match) return null;
+  const sm = parseInt(match[1], 10);
+  const sd = parseInt(match[2], 10);
+  const em = parseInt(match[3], 10);
+  const ed = parseInt(match[4], 10);
+  const year = currentYear();
+  const crossesYear = sm > em;
+  return {
+    sm,
+    sd,
+    em,
+    ed,
+    startYear: crossesYear ? year - 1 : year,
+    endYear: year,
+    crossesYear
+  };
+}
+
+function weekSortValue(weekKey) {
+  const parsed = parseWeekKey(weekKey);
+  if (!parsed) return Number.MAX_SAFE_INTEGER;
+  return parsed.startYear * 10000 + parsed.sm * 100 + parsed.sd;
+}
+
+function formatWeekLabel(weekKey) {
+  const parsed = parseWeekKey(weekKey);
+  if (!parsed) return { label: weekKey, dates: weekKey };
+  const { sm, sd, em, ed, startYear, endYear, crossesYear } = parsed;
+  if (crossesYear) {
+    return {
+      label: `${startYear}/${sm}/${sd} - ${endYear}/${em}/${ed}`,
+      dates: `${startYear}年${sm}月${sd}日 — ${endYear}年${em}月${ed}日`
+    };
+  }
+  return {
+    label: `${sm}/${sd} - ${em}/${ed}`,
+    dates: `${sm}月${sd}日 — ${em}月${ed}日`
+  };
+}
+
 function generateHtml(kanbanData) {
   const { teams } = kanbanData;
   const allWeeks = new Set();
@@ -25,15 +125,11 @@ function generateHtml(kanbanData) {
     return { id: idx + 1, name: team.name, weeks: team.weeks };
   });
 
-  const sortedWeeks = [...allWeeks].sort();
+  const sortedWeeks = [...allWeeks].sort((a, b) => weekSortValue(a) - weekSortValue(b) || String(a).localeCompare(String(b)));
 
   const weekLabels = {};
   sortedWeeks.forEach(w => {
-    const s = w.substring(0, 4);
-    const e = w.substring(5, 9);
-    const sm = parseInt(s.substring(0, 2)), sd = parseInt(s.substring(2, 4));
-    const em = parseInt(e.substring(0, 2)), ed = parseInt(e.substring(2, 4));
-    weekLabels[w] = { label: `${sm}/${sd} - ${em}/${ed}`, dates: `${sm}月${sd}日 — ${em}月${ed}日` };
+    weekLabels[w] = formatWeekLabel(w);
   });
 
   const dataJson = JSON.stringify(tableData);
@@ -1502,11 +1598,14 @@ async function main() {
   const args = process.argv.slice(2);
   const offline = args.includes('--offline');
   const refresh = args.includes('--refresh');
+  const dateRange = parseKanbanDateRange(args);
 
   const workspaceDir = resolveWorkspaceDir();
   const configFile = path.join(__dirname, '..', 'config.json');
-  const dataFilePath = findInputFile(DATA_FILE);
-  const htmlFilePath = outputPath(HTML_FILE);
+  const dataOutputName = kanbanOutputName(DATA_FILE, dateRange);
+  const htmlOutputName = kanbanOutputName(HTML_FILE, dateRange);
+  const dataFilePath = findInputFile(dataOutputName);
+  const htmlFilePath = outputPath(htmlOutputName);
 
   let kanbanData;
   let scanPacer = null;
@@ -1525,6 +1624,57 @@ async function main() {
     for (const [key, level] of cacheImportantMap.entries()) {
       setImportantLevel(importantMap, [key], level);
     }
+  }
+
+  if (dateRange) {
+    if (!offline) {
+      if (!config) {
+        console.error(`閰嶇疆鏂囦欢涓嶅瓨鍦? ${configFile}`);
+        process.exit(1);
+      }
+      console.log(`鐢熸垚鏃堕棿娈电湅鏉? ${dateRange.startDate} 至 ${dateRange.endDate}锛屽鐢ㄧ患鍚堟姤鍛奱atch-read 閫昏緫...`);
+      runBatchReadForDateRange(dateRange);
+    }
+
+    const summariesFile = findInputFile('all-team-summaries.json');
+    if (!fs.existsSync(summariesFile)) {
+      console.error(`鏃堕棿娈电湅鏉块渶瑕佺患鍚堟姤鍛婁骇鐗? ${summariesFile}`);
+      process.exit(1);
+    }
+    const teamSummaries = JSON.parse(fs.readFileSync(summariesFile, 'utf-8'));
+    kanbanData = buildKanbanDataFromTeamSummaries(teamSummaries, importantMap);
+    applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: false });
+
+    const writtenDataFile = writeOutputJson(dataOutputName, kanbanData);
+    const html = generateHtml(kanbanData);
+    fs.writeFileSync(htmlFilePath, html, 'utf-8');
+
+    let batchStats = {};
+    const batchStatsFile = findInputFile('batch-read-stats.json');
+    if (fs.existsSync(batchStatsFile)) {
+      try { batchStats = JSON.parse(fs.readFileSync(batchStatsFile, 'utf-8')); } catch (_) { batchStats = {}; }
+    }
+    const totalMeetings = countMeetings(kanbanData);
+    const dataSourceMode = offline ? 'local-data' : (batchStats.cacheRebuildUsed ? 'cache-rebuild' : 'direct-read');
+    const statsFile = writeOutputJson('kanban-generation-stats.json', {
+      type: 'kanban',
+      generatedAt: new Date().toISOString(),
+      mode: offline ? 'date-range-offline' : 'date-range',
+      dateRange,
+      dataSourceMode,
+      teams: kanbanData.teams.length,
+      meetings: totalMeetings,
+      output: {
+        data: path.basename(writtenDataFile),
+        html: path.basename(htmlFilePath)
+      },
+      batchRead: batchStats
+    });
+    console.log(`鏃堕棿娈电湅鏉挎暟鎹凡淇濆瓨: ${writtenDataFile}`);
+    console.log(`鏃堕棿娈电湅鏉垮凡鐢熸垚: ${(Buffer.byteLength(html) / 1024).toFixed(1)}KB -> ${htmlFilePath}`);
+    console.log(`  鍥㈤槦鏁? ${kanbanData.teams.length}, 浼氳鏁? ${totalMeetings}`);
+    console.log(`鐢熸垚缁熻: ${statsFile}`);
+    return;
   }
 
   if (offline) {
@@ -1645,6 +1795,10 @@ module.exports = {
   isImportantMeeting,
   applyImportantMarkersToKanbanData,
   determineScanMode,
+  parseKanbanDateRange,
+  kanbanOutputName,
+  buildKanbanDataFromTeamSummaries,
+  runBatchReadForDateRange,
   mergeKanbanData,
   countMeetings,
   reconcileWithExistingKanban,

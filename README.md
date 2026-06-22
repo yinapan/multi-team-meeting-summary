@@ -57,6 +57,25 @@ node scripts/kanban-incremental.js
 
 该入口基于已有看板数据做增量补新。若本地没有看板数据，会自动走全量扫描。
 
+### 4. 生成时间段会议记录看板
+
+```bash
+node scripts/generate-kanban.js 0610 0622
+```
+
+也可以写成：
+
+```bash
+node scripts/generate-kanban.js 06-10 06-22
+```
+
+该入口会先复用综合报告的数据读取逻辑，即执行同一套 `batch-read-documents.js <start> <end>` 时间段扫描和正文读取，再基于生成的 `outputs/all-team-summaries.json` 生成时间段看板。
+
+输出不会覆盖全量看板：
+
+- `outputs/会议看板-data-0610-0622.json`
+- `outputs/会议看板-0610-0622.html`
+
 ## 数据口径
 
 报告和看板共用同一套扫描入口：默认使用团队 `root_folder_id` 递归扫描，再按会议日期过滤。不要再按月份目录分别拼扫描逻辑。
@@ -80,6 +99,8 @@ outputs/meeting-baseline-<start>-<end>.json
 - `综合分析报告-*.docx`
 - `会议看板.html`
 - `会议看板-data.json`
+- `会议看板-<start>-<end>.html`
+- `会议看板-data-<start>-<end>.json`
 - `main-report-generation-stats.json`
 - `report-generation-stats.json`
 - `comprehensive-report-generation-stats.json`

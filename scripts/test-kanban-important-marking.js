@@ -9,6 +9,9 @@ const {
   applyImportantRecordsToMap,
   scanImportantCandidateFiles,
   determineScanMode,
+  parseKanbanDateRange,
+  kanbanOutputName,
+  buildKanbanDataFromTeamSummaries,
   mergeKanbanData,
   countMeetings,
   reconcileWithExistingKanban,
@@ -25,6 +28,48 @@ const {
 } = require('./shared');
 
 const redPeople = ['红印', '孙红印', '邹涛'];
+
+assert.deepStrictEqual(
+  parseKanbanDateRange(['0610', '0622']),
+  {
+    startDate: '06-10',
+    endDate: '06-22',
+    startLabel: '0610',
+    endLabel: '0622'
+  },
+  'kanban should accept compact MMDD date range arguments'
+);
+
+assert.strictEqual(
+  kanbanOutputName('浼氳鐪嬫澘.html', { startLabel: '0610', endLabel: '0622' }),
+  '浼氳鐪嬫澘-0610-0622.html',
+  'date-range kanban output should not overwrite the full kanban'
+);
+
+const rangeKanban = buildKanbanDataFromTeamSummaries([
+  {
+    team: 'RangeTeam',
+    weeks: {
+      '0608-0614': {
+        meetings: [
+          {
+            title: '0610 Range Meeting',
+            url: 'range-url',
+            important: 'orange',
+            meetingDate: { month: 6, day: 10 }
+          }
+        ]
+      }
+    }
+  }
+]);
+assert.deepStrictEqual(Object.keys(rangeKanban.teams[0].weeks), ['0608-0614']);
+assert.strictEqual(
+  rangeKanban.teams[0].weeks['0608-0614'][0].text,
+  `${new Date().getFullYear()}0610 - 0610 Range Meeting`,
+  'date-range kanban should be built only from batch-read team summaries'
+);
+assert.strictEqual(rangeKanban.teams[0].weeks['0608-0614'][0].important, 'orange');
 
 assert.strictEqual(
   classifyImportantByParticipants('张三、孙红印、李四', redPeople, '王五'),
@@ -181,6 +226,27 @@ assert.ok(
 assert.ok(
   /th:not\(:first-child\),\s*td:not\(:first-child\)\s*\{[^}]*min-width:\s*var\(--week-col-width\);/s.test(legendHtml),
   'week cells should use the stable week column width'
+);
+const crossYearHtml = generateHtml({
+  lastUpdate: '2026-06-22',
+  teams: [
+    {
+      name: '跨年测试',
+      weeks: {
+        '0615-0621': [{ text: '20260618 普通会议', url: '' }],
+        '1229-0104': [{ text: '20260101 跨年会议', url: '' }],
+        '0105-0111': [{ text: '20260105 年初会议', url: '' }]
+      }
+    }
+  ]
+});
+assert.ok(
+  crossYearHtml.indexOf('"1229-0104"') < crossYearHtml.indexOf('"0105-0111"'),
+  'cross-year week should sort near January instead of after June'
+);
+assert.ok(
+  crossYearHtml.includes('"1229-0104":{"label":"2025/12/29 - 2026/1/4"'),
+  'cross-year week label should include years to avoid looking like December 2026'
 );
 assert.ok(
   /\.meeting\s*\{[^}]*grid-template-columns:\s*46px minmax\(0,\s*1fr\);/s.test(legendHtml),
