@@ -16,6 +16,7 @@ const {
   countMeetings,
   reconcileWithExistingKanban,
   pruneMeetingsWithoutConcreteDate,
+  resolveMeetingDateForFile,
   isImportantMeeting,
   generateHtml
 } = require('./generate-kanban');
@@ -459,6 +460,7 @@ assert.strictEqual(
 
 assert.strictEqual(determineScanMode([], true), 'incremental');
 assert.strictEqual(determineScanMode(['--incremental'], true), 'incremental');
+assert.strictEqual(determineScanMode(['--full'], true), 'full');
 assert.strictEqual(determineScanMode(['--refresh'], true), 'full');
 assert.strictEqual(determineScanMode([], false), 'full');
 
@@ -599,6 +601,27 @@ assert.strictEqual(
   'current doc cache should mark historical kanban meetings with team leader participation'
 );
 
+const treeCachedDir = path.join(__dirname, '..', 'cache', cachedTeam, 'tree', '2026年', '6月');
+fs.mkdirSync(treeCachedDir, { recursive: true });
+fs.writeFileSync(
+  path.join(treeCachedDir, 'tree-cached-file.json'),
+  JSON.stringify({
+    mtime: 'm2',
+    content: '参会人员：张三、TeamLeader、李四\n\n## 会议记录\n正文'
+  }),
+  'utf-8'
+);
+assert.strictEqual(
+  classifyImportantForCachedFile(
+    { name: cachedTeam },
+    { id: 'tree-cached-file', mtime: 'm2', name: '20260610 - weekly.otl', link: 'tree-cache-url', folderPath: '2026年/6月' },
+    redPeople,
+    { [cachedTeam]: 'TeamLeader' }
+  ),
+  'orange',
+  'tree doc cache should be used before falling back to API for important marking'
+);
+
 const strictImportantMap = new Map();
 applyImportantRecordsToMap(strictImportantMap, [
   {
@@ -673,6 +696,31 @@ async function runAsyncTests() {
     scanned[0].name,
     '20260427-K2运营发行部周会-会议纪要.otl',
     'important refresh should scan the same nested candidate files as the kanban scan'
+  );
+  const readDocCalls = [];
+  await resolveMeetingDateForFile(
+    { name: 'CacheFirstTeam' },
+    {
+      drive_id: 'drive-1',
+      id: 'file-1',
+      name: 'NoDateMeeting.otl',
+      mtime: 123,
+      link: 'https://www.kdocs.cn/l/file-1',
+      folderName: '6月',
+      folderPath: '2026年/6月'
+    },
+    null,
+    {
+      readDoc: async (...args) => {
+        readDocCalls.push(args);
+        return 'meeting time: 2026-06-10 10:00';
+      }
+    }
+  );
+  assert.strictEqual(
+    readDocCalls[0][8],
+    '2026年/6月',
+    'full kanban document reads should pass folderPath so tree doc cache is tried before API'
   );
 }
 

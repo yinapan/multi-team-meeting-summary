@@ -5,7 +5,7 @@ const { execFileSync } = require('child_process');
 const {
   resolveWorkspaceDir, currentYear, searchFilesAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   extractDateFromFileName, extractMeetingDate, getWeekKey, normalizeDate, normalizeTitle, normalizeForMatch, charSimilarity, getTeamScanEntries,
-  RequestPacer, extractParticipants, teamDocsCacheDir, teamTreeCacheDir, readCache, getKdocsScanMode, scanFilesByMode, scanAllTeams,
+  RequestPacer, extractParticipants, teamDocsCacheDir, teamTreeCacheDir, treeDocCacheFile, readCache, getKdocsScanMode, scanFilesByMode, scanAllTeams,
   outputPath, findInputFile, writeOutputJson, readDocAsync, runPool
 } = require('./shared');
 
@@ -859,10 +859,19 @@ function applyImportantRecordsToMap(importantMap, records, importantPeople, team
   return importantMap;
 }
 
+function readDocCacheForFile(teamName, file) {
+  if (!file || !file.id) return null;
+  const treePath = file.folderPath || file.folderName || '';
+  if (treePath) {
+    const treeCached = readCache(treeDocCacheFile(teamName, treePath, file.id));
+    if (treeCached) return treeCached;
+  }
+  return readCache(path.join(teamDocsCacheDir(teamName), `${file.id}.json`));
+}
+
 function classifyImportantForCachedFile(teamCfg, file, importantPeople, teamLeaders) {
   if (!file || !file.id) return false;
-  const cacheFile = path.join(teamDocsCacheDir(teamCfg.name), `${file.id}.json`);
-  const cached = readCache(cacheFile);
+  const cached = readDocCacheForFile(teamCfg.name, file);
   if (!cached || cached.mtime !== file.mtime || !cached.content) return false;
   const participants = extractParticipants(cached.content);
   const leader = (teamLeaders || {})[teamCfg.name] || null;
@@ -1255,7 +1264,7 @@ function applyImportantMarkersToKanbanData(kanbanData, importantMap, options = {
   return kanbanData;
 }
 
-async function resolveMeetingDateForFile(teamCfg, file, pacer) {
+async function resolveMeetingDateForFile(teamCfg, file, pacer, deps = {}) {
   const fileDate = extractDateFromFileName(file.name);
   if (fileDate) return { date: fileDate, content: '' };
 
@@ -1265,7 +1274,8 @@ async function resolveMeetingDateForFile(teamCfg, file, pacer) {
   let content = cached && cached.mtime === file.mtime ? (cached.content || '') : '';
 
   if (!content && file.drive_id) {
-    content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '', file.ctime, file.folderName);
+    const readDoc = deps.readDoc || readDocAsync;
+    content = await readDoc(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '', file.ctime, file.folderName, file.folderPath || file.folderName);
   }
 
   return { date: extractMeetingDate(file.name, content, null, file.ctime, file.folderName), content: content || '' };
@@ -1273,6 +1283,7 @@ async function resolveMeetingDateForFile(teamCfg, file, pacer) {
 
 function determineScanMode(args, hasExistingData) {
   if (args.includes('--refresh')) return 'full';
+  if (args.includes('--full')) return 'full';
   if (hasExistingData) return 'incremental';
   return 'full';
 }
@@ -1400,8 +1411,7 @@ async function refreshChangedImportantRecords(config, importantPeople, teamLeade
     const files = await scanImportantCandidateFiles(teamCfg, pacer);
 
     for (const file of files) {
-      const cacheFile = path.join(teamDocsCacheDir(teamCfg.name), `${file.id}.json`);
-      const cached = readCache(cacheFile);
+      const cached = readDocCacheForFile(teamCfg.name, file);
       if (!cached) {
         missingFiles.push({ teamCfg, file });
         continue;
@@ -1419,7 +1429,7 @@ async function refreshChangedImportantRecords(config, importantPeople, teamLeade
 
   let refreshed = 0;
   const tasks = filesToRead.map(({ teamCfg, file }) => async () => {
-    const content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '');
+    const content = await readDocAsync(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '', file.ctime, file.folderName, file.folderPath || file.folderName);
     if (!content) return null;
     refreshed++;
     return {
@@ -1624,6 +1634,7 @@ async function main() {
   let kanbanData;
   let scanPacer = null;
   let config = null;
+  let runMode = offline ? 'offline' : 'incremental';
   let importantMap = new Map();
   let importantPeople = [];
   let teamLeaders = {};
@@ -1710,6 +1721,7 @@ async function main() {
 
     const startTime = Date.now();
     const scanMode = determineScanMode(args, fs.existsSync(dataFilePath));
+    runMode = scanMode;
     if (scanMode === 'full') {
       console.log(refresh ? '强制全量扫描...' : '执行全量扫描，确保看板数据完整...');
       const fullResult = await fullScan(config, importantMap, refresh);
@@ -1772,7 +1784,7 @@ async function main() {
   const statsFile = writeOutputJson('kanban-generation-stats.json', {
     type: 'kanban',
     generatedAt: new Date().toISOString(),
-    mode: refresh ? 'full' : (offline ? 'offline' : 'incremental'),
+    mode: runMode,
     dataSourceMode,
     cacheRebuildReason: dataSourceMode === 'cache-rebuild'
       ? 'KDocs 返回限流，看板使用本地缓存数据重建；限流解除后需要重新跑看板。'
@@ -1809,6 +1821,7 @@ module.exports = {
   isImportantMeeting,
   applyImportantMarkersToKanbanData,
   determineScanMode,
+  resolveMeetingDateForFile,
   parseKanbanDateRange,
   kanbanOutputName,
   buildKanbanDataFromTeamSummaries,

@@ -4,7 +4,7 @@ const { execFileSync } = require('child_process');
 function main() {
   const extraArgs = process.argv.slice(2);
   const startedAt = Date.now();
-  execFileSync(process.execPath, [path.join(__dirname, 'generate-kanban.js'), '--refresh', ...extraArgs], {
+  execFileSync(process.execPath, [path.join(__dirname, 'generate-kanban.js'), '--full', ...extraArgs], {
     cwd: path.resolve(__dirname, '..'),
     stdio: 'inherit',
     timeout: 900000,

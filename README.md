@@ -38,7 +38,15 @@ npm run kanban:full
 node scripts/kanban-full.js
 ```
 
-该入口强制递归扫描所有配置团队的 KDocs 根目录，重建：
+该入口按 cache-first 策略重建看板：优先使用本地 `cache/<team>/tree` 和 `cache/<team>/docs`，正文缓存缺失或 `mtime` 过期的文件才调用 API 补读；本地没有目录缓存的团队才走 API 扫描。
+
+如需强制联网刷新，可运行：
+
+```bash
+node scripts/generate-kanban.js --refresh
+```
+
+输出：
 
 - `outputs/会议看板-data.json`
 - `outputs/会议看板.html`

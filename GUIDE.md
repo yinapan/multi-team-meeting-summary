@@ -25,7 +25,13 @@ npm run kanban:full
 
 输出：`outputs/会议看板.html`
 
-用于重新扫描全部 KDocs 根目录并重建看板。
+用于重建全量看板。默认优先使用本地缓存，只有正文缓存缺失、过期或目录缓存不存在时才调用 KDocs API。
+
+强制联网刷新：
+
+```bash
+node scripts/generate-kanban.js --refresh
+```
 
 ### 生成增量会议记录看板
 
