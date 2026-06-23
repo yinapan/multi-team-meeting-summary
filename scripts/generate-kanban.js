@@ -43,6 +43,15 @@ function displayTitleForMeeting(rawTitle) {
   return String(rawTitle || '').replace(/\.(otl|docx|ksheet|wpp|dbsheet)$/i, '');
 }
 
+const IMPORTANT_REFRESH_EXTS = new Set(['otl', 'docx', 'ksheet', 'wpp', 'dbsheet']);
+
+function isReadableForImportantRefresh(file) {
+  const name = String((file && file.name) || '');
+  const match = name.match(/\.([^.]+)$/);
+  if (!match) return false;
+  return IMPORTANT_REFRESH_EXTS.has(match[1].toLowerCase());
+}
+
 function buildKanbanDataFromTeamSummaries(teamSummaries, importantMap = new Map()) {
   const teams = (teamSummaries || []).map(teamSummary => {
     const weeks = {};
@@ -1277,7 +1286,7 @@ async function resolveMeetingDateForFile(teamCfg, file, pacer, deps = {}) {
   const cached = readCache(cacheFile);
   let content = cached && cached.mtime === file.mtime ? (cached.content || '') : '';
 
-  if (!content && file.drive_id) {
+  if (!content && file.drive_id && isReadableForImportantRefresh(file)) {
     const readDoc = deps.readDoc || readDocAsync;
     content = await readDoc(file.drive_id, file.id, file.mtime, teamCfg.name, pacer, file.link || '', file.ctime, file.folderName, file.folderPath || file.folderName);
   }
@@ -1415,6 +1424,7 @@ async function refreshChangedImportantRecords(config, importantPeople, teamLeade
     const files = await scanImportantCandidateFiles(teamCfg, pacer);
 
     for (const file of files) {
+      if (!isReadableForImportantRefresh(file)) continue;
       const cached = readDocCacheForFile(teamCfg.name, file);
       if (!cached) {
         missingFiles.push({ teamCfg, file });
@@ -1826,6 +1836,7 @@ module.exports = {
   applyImportantMarkersToKanbanData,
   determineScanMode,
   resolveMeetingDateForFile,
+  isReadableForImportantRefresh,
   parseKanbanDateRange,
   kanbanOutputName,
   buildKanbanDataFromTeamSummaries,

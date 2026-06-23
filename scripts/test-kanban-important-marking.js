@@ -18,7 +18,8 @@ const {
   pruneMeetingsWithoutConcreteDate,
   resolveMeetingDateForFile,
   isImportantMeeting,
-  generateHtml
+  generateHtml,
+  isReadableForImportantRefresh
 } = require('./generate-kanban');
 const {
   extractDateFromFileName,
@@ -76,6 +77,32 @@ assert.strictEqual(
   'date-range kanban should preserve the original meeting title for display'
 );
 assert.strictEqual(rangeKanban.teams[0].weeks['0608-0614'][0].important, 'orange');
+
+assert.strictEqual(
+  isReadableForImportantRefresh({ name: '20260521-TA-program-weekly.otl' }),
+  true,
+  'important marker refresh should read KDocs outline files'
+);
+assert.strictEqual(
+  isReadableForImportantRefresh({ name: '04-20 meeting notes.docx' }),
+  true,
+  'important marker refresh should read Word documents'
+);
+assert.strictEqual(
+  isReadableForImportantRefresh({ name: 'role-model-ai-workflow.mp4' }),
+  false,
+  'important marker refresh should skip videos that cannot provide text content'
+);
+assert.strictEqual(
+  isReadableForImportantRefresh({ name: '20260422-UE-effects-sharing.pptx' }),
+  false,
+  'important marker refresh should skip unsupported presentation binaries'
+);
+assert.strictEqual(
+  isReadableForImportantRefresh({ name: 'untitled.pom' }),
+  false,
+  'important marker refresh should skip unsupported KDocs placeholder files'
+);
 
 assert.strictEqual(
   classifyImportantByParticipants('张三、孙红印、李四', redPeople, '王五'),
@@ -721,6 +748,34 @@ async function runAsyncTests() {
     readDocCalls[0][8],
     '2026年/6月',
     'full kanban document reads should pass folderPath so tree doc cache is tried before API'
+  );
+  const unreadableDateCalls = [];
+  const unresolvedVideo = await resolveMeetingDateForFile(
+    { name: 'CacheFirstTeam' },
+    {
+      drive_id: 'drive-1',
+      id: 'video-1',
+      name: 'NoDateVideo.mp4',
+      mtime: 123,
+      link: 'https://www.kdocs.cn/l/video-1'
+    },
+    null,
+    {
+      readDoc: async (...args) => {
+        unreadableDateCalls.push(args);
+        return 'meeting time: 2026-06-10 10:00';
+      }
+    }
+  );
+  assert.deepStrictEqual(
+    unresolvedVideo,
+    { date: null, content: '' },
+    'date fallback should not read unsupported binary files'
+  );
+  assert.strictEqual(
+    unreadableDateCalls.length,
+    0,
+    'unsupported binary files should not call readDoc during date fallback'
   );
 }
 
