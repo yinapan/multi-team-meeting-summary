@@ -55,6 +55,28 @@ npm run kanban
 
 基于已有看板数据补充新增会议记录。
 
+### 时间段看板
+
+```bash
+npm run kanban:range -- <start_date> <end_date>
+```
+
+或直接调用：
+
+```bash
+node scripts/generate-kanban.js <start_date> <end_date>
+```
+
+示例：
+
+```bash
+npm run kanban:range -- 0610 0622
+```
+
+输出：`outputs/会议看板-<start>-<end>.html` 和 `outputs/会议看板-data-<start>-<end>.json`
+
+该入口复用综合报告的时间段读取逻辑，先执行 `batch-read-documents.js <start> <end>` 生成 `outputs/all-team-summaries.json`，再基于时间段数据生成看板，不覆盖全量看板。
+
 ## 数据口径铁律
 
 - 报告和看板必须共用同一套扫描入口。
