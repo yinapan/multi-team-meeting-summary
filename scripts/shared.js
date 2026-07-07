@@ -1871,18 +1871,57 @@ function getMeetingListItemsFromTeamEntry(entry) {
   }));
 }
 
+function getMeetingTitle(item) {
+  if (!item) return '';
+  return String(item.name || item.title || item.text || '');
+}
+
+function isConfidentialMeetingTitle(title) {
+  return String(title || '').includes('【保密】');
+}
+
+function isImportantMeetingTitle(title) {
+  return String(title || '').includes('【重要】');
+}
+
+function isAnalyzableMeeting(item) {
+  return !isConfidentialMeetingTitle(getMeetingTitle(item));
+}
+
+function filterAnalyzableMeetings(items) {
+  return (items || []).filter(isAnalyzableMeeting);
+}
+
+function sortImportantMeetingsFirst(items) {
+  return [...(items || [])].sort((a, b) => {
+    const ai = !!(a && (a.important || isImportantMeetingTitle(getMeetingTitle(a))));
+    const bi = !!(b && (b.important || isImportantMeetingTitle(getMeetingTitle(b))));
+    return Number(bi) - Number(ai);
+  });
+}
+
 function createMeetingBaseline(teamEntries, options = {}) {
+  const applyMeetingTitleFilters = options.applyMeetingTitleFilters === true;
   const teams = (teamEntries || []).map(entry => {
     const team = entry.team || entry.teamName || (entry.data && entry.data.team) || '';
-    const documents = getDocumentListFromTeamEntry(entry);
-    const meetingListItems = getMeetingListItemsFromTeamEntry(entry);
+    const documents = applyMeetingTitleFilters
+      ? filterAnalyzableMeetings(getDocumentListFromTeamEntry(entry))
+      : getDocumentListFromTeamEntry(entry);
+    const meetingListItems = applyMeetingTitleFilters
+      ? filterAnalyzableMeetings(getMeetingListItemsFromTeamEntry(entry))
+      : getMeetingListItemsFromTeamEntry(entry);
     const successfulReadCount = documents.filter(doc =>
       (doc.rawContent && String(doc.rawContent).trim()) ||
       (Array.isArray(doc.conclusions) && doc.conclusions.length > 0) ||
       (Array.isArray(doc.todos) && doc.todos.length > 0)
     ).length;
     const analyzedDocumentCount = documents.length;
-    const meetingListCount = Number(entry.meetingListCount || entry.totalScanned || meetingListItems.length || analyzedDocumentCount);
+    const hasExplicitMeetingList = Array.isArray(entry.meetingListItems);
+    const meetingListCount = Number(
+      hasExplicitMeetingList
+        ? meetingListItems.length
+        : (entry.meetingListCount || entry.totalScanned || meetingListItems.length || analyzedDocumentCount)
+    );
     return {
       team,
       meetingListCount,
@@ -2226,7 +2265,7 @@ function analyzeDocs(documents, teamName, options = {}) {
     allTodos.push(...splitTodos);
     allConclusionItems.push(...splitConclusions.map(text => ({ text, source, sourceLabel: d.sourceLabel || '', docName: stripDocExt(d.name || '') })));
     allTodoItems.push(...splitTodos.map(text => ({ text, source, sourceLabel: d.sourceLabel || '', docName: stripDocExt(d.name || '') })));
-    if (d.important) importantCount++;
+    if (d.important || isImportantMeetingTitle(d.name || d.title)) importantCount++;
   });
 
   // 从全文中补充议题标题到 allConclusions
@@ -2886,12 +2925,14 @@ function resolveOpenClawProviders() {
     if (!cfgPath) return providers;
     const data = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
     const provMap = data.models?.providers || {};
-    const preferredModels = ['mimo-v2-pro', 'glm-5.1', 'mco-4', 'deepseek-v3.2', 'kimi-k2.5'];
+    const preferredModels = ['mimo-v2.5', 'mco-4', 'mimo-v2-pro', 'glm-5.1', 'deepseek-v3.2', 'kimi-k2.5'];
     for (const [name, cfg] of Object.entries(provMap)) {
       const resolvedCfg = resolveConfigPlaceholders(cfg);
       if (!resolvedCfg.baseUrl || !resolvedCfg.apiKey) continue;
       const models = resolvedCfg.models || [];
-      const picked = models.find(m => preferredModels.includes(m.id)) || models[0];
+      const picked = preferredModels
+        .map(id => models.find(m => m.id === id))
+        .find(Boolean) || models[0];
       if (!picked) continue;
       providers.push({
         providerName: name,
@@ -3022,6 +3063,29 @@ function summarizeTeamSummaryCompression(rawSummaries, compactedSummaries) {
   return { rawChars, compactChars, savedChars, ratio };
 }
 
+function importantMeetingDigestForComprehensive(teamDataList, options = {}) {
+  const perDocLimit = Number(options.perDocLimit) || 8;
+  const maxDocs = Number(options.maxDocs) || 30;
+  const lines = [];
+  for (const td of teamDataList || []) {
+    const teamName = td.teamName || (td.data && td.data.team) || '';
+    const docs = sortImportantMeetingsFirst((td.data && td.data.documents) || [])
+      .filter(doc => doc && (doc.important || isImportantMeetingTitle(doc.name || doc.title)));
+    for (const doc of docs.slice(0, maxDocs)) {
+      const source = formatSourceRef(teamName, doc);
+      lines.push(`- ${source}`);
+      (doc.conclusions || []).slice(0, perDocLimit).forEach(item => lines.push(`  conclusion: ${item}`));
+      (doc.todos || []).slice(0, perDocLimit).forEach(item => lines.push(`  todo: ${item}`));
+      if (doc.rawContent && lines.length < 200) {
+        String(doc.rawContent).split(/\r?\n/).map(s => s.trim()).filter(Boolean).slice(0, 6).forEach(item => {
+          if (item.length > 8) lines.push(`  raw: ${item.substring(0, 180)}`);
+        });
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
 function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   const { startDate, endDate, grandTotalDocs, teamCount, teamSummaries, multiSourceTeamNames } = options;
   const reportLimits = options.reportLimits || {};
@@ -3033,6 +3097,11 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
     : teamSummaries;
   const msNames = multiSourceTeamNames || [];
   const parts = [];
+  const importantDigest = importantMeetingDigestForComprehensive(teamDataList, {
+    perDocLimit: Math.max(8, Number(reportLimits.perDocumentItemLimit) || 5)
+  });
+  parts.push('IMPORTANT MEETING PRIORITY: 标题含【重要】或标记为重要会议的数据必须提高权重；趋势、风险、决策、时间节点和建议优先从重要会议中提取。重要会议内容不得被普通会议摘要挤出。');
+  parts.push('');
 
   parts.push('你是一位企业战略分析师，负责从多团队会议记录中提炼关键信息并撰写分析报告。');
   parts.push('');
@@ -3049,6 +3118,13 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('请为综合分析报告生成全部分析内容。');
   parts.push('');
 
+  if (importantDigest) {
+    parts.push('## IMPORTANT MEETING DIGEST');
+    parts.push('以下为重要会议的加权输入，必须优先用于综合趋势、风险、关键决策、时间节点和建议：');
+    parts.push(importantDigest);
+    parts.push('');
+  }
+
   for (const td of teamDataList) {
     const summary = activeTeamSummaries && activeTeamSummaries[td.teamName];
     if (summary) {
@@ -3063,7 +3139,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
       parts.push(`# ${td.teamName}（${td.data.documents.length}场会议）`);
       parts.push('');
       parts.push('会议清单：');
-      td.data.documents.forEach(d => {
+      sortImportantMeetingsFirst(td.data.documents).forEach(d => {
         const name = formatSourceRef(td.teamName, d);
         parts.push(`  - ${name}（结论${(d.conclusions||[]).length}条，待办${(d.todos||[]).length}条${d.important ? '，重要' : ''}）`);
       });
@@ -3201,6 +3277,8 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   const promptMinItems = Number(reportLimits.promptMinItems) || 5;
   const promptMaxItems = Number(reportLimits.promptMaxItems) || 12;
   const parts = [];
+  parts.push('IMPORTANT MEETING PRIORITY: 标题含【重要】或标记为重要会议的数据必须优先提取；核心议题、关键决议、风险、节点和建议都优先使用重要会议内容。');
+  parts.push('');
 
   parts.push(`你是一位项目管理分析师。你的唯一信息来源是下面提供的会议数据，数据中没有的内容绝对不允许出现在报告中。`);
   parts.push('');
@@ -3217,7 +3295,7 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   parts.push('## 会议记录数据');
   parts.push('');
 
-  for (const doc of data.documents) {
+  for (const doc of sortImportantMeetingsFirst(data.documents)) {
     const name = (doc.name || '').replace(/\.\w+$/i, '');
     parts.push(`### ${name}${doc.important ? '（重要会议）' : ''}`);
     parts.push(`  来源：${formatSourceRef(teamName, doc)}`);
@@ -3574,6 +3652,7 @@ module.exports = {
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
   docStyles, docNumbering, resolveWorkspaceDir, ensureOutputDir, outputPath, findInputFile, readInputJson, writeOutputJson,
   getBaselineFileName, createMeetingBaseline, writeMeetingBaseline, readMeetingBaseline,
+  isConfidentialMeetingTitle, isImportantMeetingTitle, isAnalyzableMeeting, filterAnalyzableMeetings, sortImportantMeetingsFirst,
   currentYear, normalizeDate, formatDateChinese, extractDateFromFileName, extractDateFromFolderName, extractDateFromContent, extractMeetingDate, meetingDateInRange, dateInRange, getWeekKey,
   listFolder, scanFolder, scanFolderWithStats, scanFolderAll, scanFolderFromDate,
   listFolderAsync, searchFilesAsync: searchFilesAsyncRateLimited, dateToUnixSeconds,

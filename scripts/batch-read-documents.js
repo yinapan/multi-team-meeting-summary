@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, teamDocsCacheDir, treeDocCacheFile, ensureCacheDir, readCache, scanAllTeams, RequestPacer, extractInfo, getKdocsConfig, outputPath, writeOutputJson, writeMeetingBaseline, readDocAsync, runPool } = require('./shared');
+const { resolveWorkspaceDir, getWeekKey, normalizeDate, dateInRange, extractMeetingDate, teamDocsCacheDir, treeDocCacheFile, ensureCacheDir, readCache, scanAllTeams, RequestPacer, extractInfo, getKdocsConfig, outputPath, writeOutputJson, writeMeetingBaseline, readDocAsync, runPool, filterAnalyzableMeetings, isConfidentialMeetingTitle, isImportantMeetingTitle, sortImportantMeetingsFirst } = require('./shared');
 
 const CONCURRENCY = Number(getKdocsConfig().documentConcurrency) || 5;
 
@@ -38,6 +38,7 @@ async function main() {
   }
   const warmCacheOnly = args.includes('--warm-cache');
   const resume = args.includes('--resume');
+  const applyReportAnalysisFilter = args.includes('--report-analysis-filter') || process.env.APPLY_REPORT_ANALYSIS_FILTER === '1';
   const startDate = normalizeDate(args[0]);
   const endDate = normalizeDate(args[1]);
   const overallStartTime = Date.now();
@@ -57,7 +58,12 @@ async function main() {
     const teamCfg = config.teams.find(t => t.name === scanned.team);
     if (!teamCfg) continue;
     console.log(`\n===== ${teamCfg.name} =====`);
-    const allFiles = scanned.files;
+    const scannedFiles = scanned.files || [];
+    const confidentialFiles = applyReportAnalysisFilter ? scannedFiles.filter(f => isConfidentialMeetingTitle(f.name)) : [];
+    const allFiles = applyReportAnalysisFilter ? filterAnalyzableMeetings(scannedFiles) : scannedFiles;
+    if (applyReportAnalysisFilter && confidentialFiles.length > 0) {
+      console.log(`  已跳过 ${confidentialFiles.length} 篇标题含【保密】的会议记录，不读取正文且不纳入统计`);
+    }
 
     const candidateCount = allFiles.length;
     if (candidateCount === 0) {
@@ -118,6 +124,9 @@ async function main() {
         if (warmCacheOnly) return null;
         const teamPeople = teamCfg.leader ? [...importantPeople, teamCfg.leader] : importantPeople;
         const info = extractInfo(md, f.name, teamPeople);
+        if (applyReportAnalysisFilter) {
+          info.important = info.important || isImportantMeetingTitle(f.name);
+        }
         info.meetingDate = extractMeetingDate(f.name, md, null, f.ctime, f.folderName) || null;
         info.id = f.id;
         info.drive_id = f.drive_id;
@@ -135,7 +144,9 @@ async function main() {
     });
 
     const rawResults = await runPool(tasks, CONCURRENCY);
-    const documents = rawResults.filter(Boolean);
+    const documents = applyReportAnalysisFilter
+      ? sortImportantMeetingsFirst(rawResults.filter(Boolean))
+      : rawResults.filter(Boolean);
 
     // 不可读文件也作为占位文档纳入，确保看板和报告不丢失记录
     for (const f of allFiles) {
@@ -156,7 +167,7 @@ async function main() {
         meetingTime: null,
         conclusions: [],
         todos: [],
-        important: null,
+        important: applyReportAnalysisFilter ? isImportantMeetingTitle(f.name) : null,
         rawContent: '',
         unreadable: true
       });
@@ -190,7 +201,8 @@ async function main() {
       meetingListItems: allMeetingItems,
       unreadableMeetings,
       excludedMeetings: diagnosticExcludedMeetings,
-      excludedMeetingCount: excludedMeetings.length
+      excludedMeetingCount: excludedMeetings.length,
+      confidentialMeetingCount: confidentialFiles.length
     });
   }
 
@@ -255,7 +267,8 @@ async function main() {
   const { baseline, file: baselineFile } = writeMeetingBaseline(allTeamsData, {
     startDate,
     endDate,
-    source: 'batch-read-documents'
+    source: 'batch-read-documents',
+    applyMeetingTitleFilters: applyReportAnalysisFilter
   });
   console.log(`baseline: ${baselineFile}`);
   console.log(`counts: meetingList=${baseline.counts.meetingListCount}, successfulRead=${baseline.counts.successfulReadCount}, analyzed=${baseline.counts.analyzedDocumentCount}`);

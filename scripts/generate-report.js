@@ -50,7 +50,12 @@ function main() {
   const [startDate, endDate] = args;
   const timings = [];
 
-  timings.push({ module: '批量读取会议记录', elapsedSec: runNode('batch-read-documents.js', [startDate, endDate]) });
+  timings.push({
+    module: '批量读取会议记录',
+    elapsedSec: runNode('batch-read-documents.js', [startDate, endDate, '--report-analysis-filter'], {
+      env: { APPLY_REPORT_ANALYSIS_FILTER: '1' }
+    })
+  });
   timings.push({
     module: '生成团队 LLM 摘要',
     elapsedSec: runNode('generate-team-report.js', [startDate, endDate, '--no-kanban'], {
