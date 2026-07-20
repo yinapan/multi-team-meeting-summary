@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const source = fs.readFileSync(path.join(__dirname, 'generate-comprehensive-report.js'), 'utf-8');
-const match = source.match(/function buildFallbackSection5[\s\S]*?\n}\n\n\/\/ ========== 主函数/);
+const match = source.match(/function buildFallbackSection5[\s\S]*?\r?\n}\r?\n\r?\n\/\/ ========== [^\r\n]*\r?\nasync function main/);
 assert(match, 'buildFallbackSection5 should exist');
 
 const section5Source = match[0];

@@ -11,6 +11,7 @@ const {
   extractMeetingDate, readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   printAiReviewWarning,
   isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
+  filterAnalyzableMeetings, isImportantMeetingTitle, sortImportantMeetingsFirst,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, PageNumber
 } = require('./shared');
@@ -255,6 +256,25 @@ function buildFallbackContent(teamDataList, allHighRisks, allMidRisks, opts) {
   return elements;
 }
 
+function prioritizedDocItems(docs, teamName, kind, reportLimits, label = '') {
+  const field = kind === 'todos' ? 'todos' : 'conclusions';
+  const baseLimit = Number(reportLimits.perDocumentItemLimit) || 5;
+  const importantLimit = Math.max(baseLimit * 2, baseLimit + 3);
+  return sortImportantMeetingsFirst(docs)
+    .flatMap(d => {
+      const important = d.important || isImportantMeetingTitle(d.name || d.title);
+      return (d[field] || [])
+        .slice(0, important ? importantLimit : baseLimit)
+        .map(text => ({
+        text: cleanText(text),
+        source: formatSourceRef(teamName, d),
+        important,
+        label
+      }))
+        .filter(item => isValidConclusion(item.text));
+    });
+}
+
 function buildFallbackSection4(teamDataList, reportLimits = getReportLimits()) {
   const elements = [];
   elements.push(pb(), h2("四、各团队会议汇总"));
@@ -266,17 +286,17 @@ function buildFallbackSection4(teamDataList, reportLimits = getReportLimits()) {
       for (const [label, docs] of td.labelGroups) {
         elements.push(h3(`${label}（${docs.length}份）`));
         elements.push(p("核心议题：", { bold: true }));
-        docs.flatMap(d => (d.conclusions || []).slice(0, reportLimits.perDocumentItemLimit).map(c => ({ text: cleanText(c), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.multiSourceSectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220), { bold: `【${td.teamName}-${label}】` })));
+        prioritizedDocItems(docs, td.teamName, 'conclusions', reportLimits, label).slice(0, reportLimits.multiSourceSectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220), { bold: `【${td.teamName}-${label}】` })));
         elements.push(p("关键决议：", { bold: true }));
-        docs.flatMap(d => (d.todos || []).slice(0, reportLimits.perDocumentItemLimit).map(t => ({ text: cleanText(t), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.multiSourceSectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220), { bold: `【${td.teamName}-${label}】` })));
+        prioritizedDocItems(docs, td.teamName, 'todos', reportLimits, label).slice(0, reportLimits.multiSourceSectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220), { bold: `【${td.teamName}-${label}】` })));
       }
     } else {
       elements.push(h3("会议统计"));
       elements.push(p(`会议数量：${td.data.documents.length}份${td.analysis.importantCount > 0 ? `（其中重要会议${td.analysis.importantCount}份）` : ''}`, { bold: true }));
       elements.push(h3("核心议题"));
-      td.data.documents.flatMap(d => (d.conclusions || []).slice(0, reportLimits.perDocumentItemLimit).map(c => ({ text: cleanText(c), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.sectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
+      prioritizedDocItems(td.data.documents, td.teamName, 'conclusions', reportLimits).slice(0, reportLimits.sectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
       elements.push(h3("关键决议"));
-      td.data.documents.flatMap(d => (d.todos || []).slice(0, reportLimits.perDocumentItemLimit).map(t => ({ text: cleanText(t), source: formatSourceRef(td.teamName, d) })).filter(item => isValidConclusion(item.text))).slice(0, reportLimits.sectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
+      prioritizedDocItems(td.data.documents, td.teamName, 'todos', reportLimits).slice(0, reportLimits.sectionItemLimit).forEach(item => elements.push(bullet(sourcedItemText(item).substring(0, 220))));
     }
   });
   return elements;
@@ -372,14 +392,17 @@ async function main() {
       const documents = [];
       for (const wData of Object.values(teamEntry.weeks)) {
         for (const m of wData.meetings) {
-          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important, rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null, meetingDate: m.meetingDate || null });
+          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important || isImportantMeetingTitle(m.title), rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null, meetingDate: m.meetingDate || null });
         }
       }
       data = { team: team.name, documents };
     }
-    data.documents = data.documents.filter(d =>
+    data.documents = sortImportantMeetingsFirst(filterAnalyzableMeetings(data.documents).map(d => ({
+      ...d,
+      important: d.important || isImportantMeetingTitle(d.name || d.title)
+    })).filter(d =>
       d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '', d.mtime || null, d.ctime || null, d.folderName || null)
-    );
+    ));
     if (data.documents.length === 0) { console.log(`跳过 ${team.name}：日期范围内无文档`); continue; }
     const analysis = analyzeDocs(data.documents, team.name, { startDate, endDate });
 
