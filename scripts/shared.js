@@ -3076,11 +3076,6 @@ function importantMeetingDigestForComprehensive(teamDataList, options = {}) {
       lines.push(`- ${source}`);
       (doc.conclusions || []).slice(0, perDocLimit).forEach(item => lines.push(`  conclusion: ${item}`));
       (doc.todos || []).slice(0, perDocLimit).forEach(item => lines.push(`  todo: ${item}`));
-      if (doc.rawContent && lines.length < 200) {
-        String(doc.rawContent).split(/\r?\n/).map(s => s.trim()).filter(Boolean).slice(0, 6).forEach(item => {
-          if (item.length > 8) lines.push(`  raw: ${item.substring(0, 180)}`);
-        });
-      }
     }
   }
   return lines.join('\n');
