@@ -2277,7 +2277,7 @@ function analyzeDocs(documents, teamName, options = {}) {
       const topicMatch = line.match(/^(?:议题[一二三四五六七八九十\d]*|主题)[：:]\s*(.+)/);
       if (topicMatch) {
         const topic = topicMatch[1].trim();
-        if (topic.length > 5 && !allConclusions.includes(topic)) {
+        if (topic.length > 5 && !allConclusions.includes(topic) && isValidConclusion(topic)) {
           allConclusions.push(topic);
           allConclusionItems.push({
             text: topic,
@@ -2315,6 +2315,8 @@ function analyzeDocs(documents, teamName, options = {}) {
     if (/仅剩.{0,10}未解决/.test(cleaned)) return;
     if (/已(修复|解决|修正|回测|完成)/.test(cleaned) && !/未/.test(cleaned) && cleaned.length < 60) return;
     if (/预设.*严重|提问方式/.test(cleaned)) return;
+    if (/(?:不存在|没有|不再|无需|无须|未出现|未发现|未发生|已消除|已排除|已规避|已缓解|已改善|已受控|已可控)/.test(cleaned)) return;
+    if (/并非|并不是/.test(cleaned) && cleaned.length < 80) return;
     let level = null, matchedKw = '';
     for (const kw of riskKeywords.high) {
       if (cleaned.includes(kw)) { level = 'high'; matchedKw = kw; break; }
@@ -3106,8 +3108,9 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('3. 提到人名时，只能引用该人在数据中实际承担的具体任务或实际发言，一字不多。');
   parts.push('4. 禁止编造数字、百分比、时间节点。所有数字必须能在数据中找到原文。');
   parts.push('5. 每条分析必须能指出来源于哪场会议的哪条结论或待办。如果某个章节数据不足以支撑分析，直接写"数据不足，暂无法分析"，绝不凑内容。');
-  parts.push('6. 风险分析只能基于数据中明确提到的问题原文，不允许自行推断潜在风险。');
-  parts.push('7. 报告面向对外阅读，正文段落和普通 bullet 不要在句尾输出"（来源：...）"；来源只保留在表格的"来源会议"列以及附录中。');
+  parts.push('6. 识别源数据中的推测性表述：结论或待办中带有"计划""预计""初步""考虑""拟""可能""争取""探索""尝试""有望""或将"等修饰词的陈述，在写入报告时必须保留其不确定性语气，不得改写为确定性陈述。');
+  parts.push('7. 风险分析只能基于数据中明确提到的问题原文，不允许自行推断潜在风险。');
+  parts.push('8. 报告面向对外阅读，正文段落和普通 bullet 不要在句尾输出"（来源：...）"；来源只保留在表格的"来源会议"列以及附录中。');
   parts.push('');
   parts.push(`基于以下 ${teamCount || teamDataList.length} 个团队共 ${grandTotalDocs || '若干'} 份会议记录的汇总数据（${startDate} ~ ${endDate}），`);
   parts.push('请为综合分析报告生成全部分析内容。');
@@ -3282,7 +3285,7 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
   parts.push('2. 禁止编造人员的个人情况（预产期、家庭、健康、学习方向、能力评价、工作负荷评估等）。');
   parts.push('3. 提到人名时，只能引用该人在数据中实际承担的具体任务，不能添加任何数据中未出现的描述。');
   parts.push('4. 禁止编造数字、百分比、时间节点。所有数字必须能在数据中找到原文出处。');
-  parts.push('5. 如果某个章节数据不足以支撑分析，直接写"数据不足，暂无法分析"，绝不凑内容。');
+  parts.push('5. 识别源数据中的推测性表述：结论或待办中带有"计划""预计""初步""考虑""拟""可能""争取""探索""尝试""有望""或将"等修饰词的陈述，在写入报告时必须保留其不确定性语气（如"团队计划Q3上线""初步评估性能可提升"），不得改写为确定性陈述。');
   parts.push('');
   parts.push(`基于${teamName}团队的 ${data.documents.length} 份会议记录（${startDate} ~ ${endDate}），`);
   parts.push('请为该团队的会议汇总分析报告生成全部分析内容。');
@@ -3295,10 +3298,10 @@ function buildTeamReportPrompt(data, analysis, teamName, options = {}) {
     parts.push(`### ${name}${doc.important ? '（重要会议）' : ''}`);
     parts.push(`  来源：${formatSourceRef(teamName, doc)}`);
     if (doc.conclusions && doc.conclusions.length > 0) {
-      doc.conclusions.forEach(c => parts.push(`  结论：${withSourceRef(c, formatSourceRef(teamName, doc))}`));
+      doc.conclusions.forEach(c => parts.push(`  结论：${withSourceRef(cleanText(c), formatSourceRef(teamName, doc))}`));
     }
     if (doc.todos && doc.todos.length > 0) {
-      doc.todos.forEach(t => parts.push(`  待办：${withSourceRef(t, formatSourceRef(teamName, doc))}`));
+      doc.todos.forEach(t => parts.push(`  待办：${withSourceRef(cleanText(t), formatSourceRef(teamName, doc))}`));
     }
     parts.push('');
   }
