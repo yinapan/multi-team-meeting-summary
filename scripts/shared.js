@@ -538,6 +538,8 @@ function currentYear() {
 function normalizeDate(dateArg) {
   let m = dateArg.match(/^\d{4}(\d{2})(\d{2})$/);
   if (m) return `${m[1]}-${m[2]}`;
+  m = dateArg.match(/^(\d{2})(\d{2})$/);
+  if (m) return `${m[1]}-${m[2]}`;
   m = dateArg.match(/^(\d{1,2})[.\-](\d{1,2})$/);
   if (m) return `${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
   return dateArg;
