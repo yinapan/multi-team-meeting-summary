@@ -617,6 +617,13 @@ function extractDateFromFileName(fileName) {
     if (date) return date;
   }
 
+  // 匹配 MMDD 开头后直接跟非数字（无破折号）: 0706项目周会, 0706 会议记录
+  match = fileName.match(/^(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?=\D)/);
+  if (match) {
+    const date = makeDate(match[1], match[2]);
+    if (date) return date;
+  }
+
   // 匹配文件名末尾的 MMDD（无分隔符）: xxx0415, xxx0422
   match = fileName.match(/(?:^|[^\d])(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/);
   if (match) {

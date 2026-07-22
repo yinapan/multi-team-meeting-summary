@@ -81,7 +81,7 @@ async function main() {
     // 预过滤：文件名日期明确超出范围且 folderName 也无匹配日期 → 跳过 API 读取
     const preFilteredOut = [];
     const preFilteredFiles = allFiles.filter(f => {
-      if (dateInRange(f.name, startDate, endDate, '', null, null, f.folderName)) return true;
+      if (dateInRange(f.name, startDate, endDate, '', f.mtime, f.ctime, f.folderName)) return true;
       preFilteredOut.push(f);
       return false;
     });
