@@ -413,7 +413,9 @@ async function main() {
         console.log(`  [${label}] 调用 LLM（${(prompt.length / 1024).toFixed(1)}KB prompt, ${docs.length}篇）...`);
         let llmResult = await callLLM(prompt, config);
         if (llmResult) {
-          llmResult = normalizeMultiSourceBulletPrefixes(llmResult, [teamName]);
+          llmResult = normalizeMultiSourceBulletPrefixes(llmResult, [teamName], {
+            expectedLabels: { [teamName]: label }
+          });
           console.log(`  [${label}] LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB`);
           const summaryFile = outputPath(`team-llm-summary-${teamName}-${label}.md`);
           fs.writeFileSync(summaryFile, llmResult, 'utf-8');

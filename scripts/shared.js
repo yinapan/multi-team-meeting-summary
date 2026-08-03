@@ -2225,11 +2225,81 @@ function escapeRegExp(text) {
   return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function normalizeMultiSourceBulletPrefixes(markdown, teamNames = []) {
+function splitMarkdownTableRow(line) {
+  const cells = [];
+  let current = '';
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '|') {
+      let backslashes = 0;
+      for (let j = i - 1; j >= 0 && line[j] === '\\'; j--) backslashes++;
+      if (backslashes % 2 === 0) {
+        cells.push(current);
+        current = '';
+        continue;
+      }
+    }
+    current += line[i];
+  }
+  cells.push(current);
+  return cells;
+}
+
+function normalizeMarkdownTableSources(markdown, canonicalPrefix, teamName) {
+  let sourceColumn = -1;
+  return String(markdown || '').split('\n').map(line => {
+    if (!/^\s*\|/.test(line)) {
+      sourceColumn = -1;
+      return line;
+    }
+    const cells = splitMarkdownTableRow(line);
+    const headerIndex = cells.findIndex(cell => /^(?:来源会议|source)$/i.test(cell.trim()));
+    if (headerIndex >= 0) {
+      sourceColumn = headerIndex;
+      return line;
+    }
+    if (sourceColumn < 0 || sourceColumn >= cells.length) return line;
+    const source = cells[sourceColumn].trim();
+    if (!source || /^:?-{3,}:?$/.test(source) || source === canonicalPrefix || source.startsWith(`${canonicalPrefix}-`)) return line;
+    const withoutTeam = source.startsWith(`${teamName}-`)
+      ? source.slice(teamName.length + 1)
+      : source;
+    cells[sourceColumn] = cells[sourceColumn].replace(source, `${canonicalPrefix}-${withoutTeam}`);
+    return cells.join('|');
+  }).join('\n');
+}
+
+function normalizeMultiSourceBulletPrefixes(markdown, teamNames = [], options = {}) {
   let result = String(markdown || '');
+  const expectedLabels = options.expectedLabels || {};
   for (const teamName of teamNames || []) {
     if (!teamName) continue;
     const teamRe = escapeRegExp(teamName);
+    const expectedLabel = expectedLabels[teamName];
+    if (expectedLabel) {
+      const canonicalPrefix = `${teamName}-${expectedLabel}`;
+      const severityLabels = new Set(['高', '中', '低', '高风险', '中风险', '低风险']);
+
+      result = result.replace(
+        /(^\s*(?:[•\-*]|\d+[.、])\s*)【([^】]+)】/gm,
+        (match, bulletPrefix, currentLabel) => severityLabels.has(currentLabel)
+          ? `${bulletPrefix}【${canonicalPrefix}】【${currentLabel}】`
+          : `${bulletPrefix}【${canonicalPrefix}】`
+      );
+      result = result.replace(
+        /(^\s*(?:[•\-*]|\d+[.、]))(?![ \t]*【)([ \t]*)/gm,
+        `$1$2【${canonicalPrefix}】`
+      );
+      result = result.replace(/([（(]来源[:：]\s*)([^）)]+)([）)])/g, (match, lead, source, tail) => {
+        const trimmed = source.trim();
+        if (!trimmed || trimmed === '未知' || trimmed === canonicalPrefix || trimmed.startsWith(`${canonicalPrefix}-`)) return match;
+        const withoutTeam = trimmed.startsWith(`${teamName}-`)
+          ? trimmed.slice(teamName.length + 1)
+          : trimmed;
+        return `${lead}${canonicalPrefix}-${withoutTeam}${tail}`;
+      });
+      result = normalizeMarkdownTableSources(result, canonicalPrefix, teamName);
+      continue;
+    }
     const re = new RegExp(
       `(^\\s*(?:[•\\-*]|\\d+[.、])\\s*)【${teamRe}】([^\\n]*(?:（来源：|\\(来源:|\\(来源：)${teamRe}-([^\\s\\-（）()]+)-)`,
       'gm'
@@ -3000,12 +3070,9 @@ async function callLLM(prompt, config = {}) {
 }
 
 // ========== 综合报告 prompt ==========
-function compactOneTeamSummaryForComprehensive(summary, options = {}) {
-  const maxChars = Math.max(600, Number(options.maxCharsPerTeam) || 2600);
-  const text = String(summary || '').replace(/\r\n/g, '\n');
-  if (text.length <= maxChars) return text.trim();
-
-  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+function compactSummaryBlock(text, maxChars) {
+  const charLimit = Math.max(1, Number(maxChars) || 2600);
+  const lines = String(text || '').split('\n').map(line => line.trim()).filter(Boolean);
   const mustKeepPatterns = [
     /^#{1,4}\s+/,
     /风险|高风险|中风险|阻塞|延期|异常|缺口|问题|隐患|风险点/,
@@ -3042,20 +3109,50 @@ function compactOneTeamSummaryForComprehensive(summary, options = {}) {
     }
   }
 
-  let compacted = selected.join('\n');
-  if (compacted.length > maxChars) {
-    const capped = [];
-    let total = 0;
-    for (const line of selected) {
-      const nextTotal = total + line.length + 1;
-      if (nextTotal > maxChars) break;
-      capped.push(line);
-      total = nextTotal;
-    }
-    compacted = capped.join('\n');
+  const capped = [];
+  let total = 0;
+  for (const line of selected) {
+    const separatorLength = capped.length > 0 ? 1 : 0;
+    const remaining = charLimit - total - separatorLength;
+    if (remaining <= 0) break;
+    const fittedLine = line.length <= remaining ? line : line.slice(0, remaining);
+    if (!fittedLine) break;
+    capped.push(fittedLine);
+    total += fittedLine.length + separatorLength;
+    if (fittedLine.length < line.length) break;
   }
+  return capped.join('\n').trim() || String(text || '').slice(0, charLimit).trim();
+}
 
-  return compacted.trim() || text.slice(0, maxChars).trim();
+function splitMultiSourceSummary(summary) {
+  const text = String(summary || '').replace(/\r\n/g, '\n');
+  const headingRe = /^##\s+(?!\d+(?:\.\d+)*\b)([^\n]+)$/gm;
+  const matches = [...text.matchAll(headingRe)].filter(match => {
+    if (match.index === 0) return true;
+    return /(?:^|\n)---\s*\n\s*$/.test(text.slice(0, match.index));
+  });
+  if (matches.length < 2) return null;
+  return matches.map((match, index) => {
+    const start = match.index;
+    const end = index + 1 < matches.length ? matches[index + 1].index : text.length;
+    return text.slice(start, end).trim();
+  });
+}
+
+function compactOneTeamSummaryForComprehensive(summary, options = {}) {
+  const maxChars = Math.max(600, Number(options.maxCharsPerTeam) || 2600);
+  const text = String(summary || '').replace(/\r\n/g, '\n');
+  if (text.length <= maxChars) return text.trim();
+  const sourceSections = splitMultiSourceSummary(text);
+  if (sourceSections) {
+    const separatorChars = (sourceSections.length - 1) * 2;
+    const perSectionLimit = Math.floor((maxChars - separatorChars) / sourceSections.length);
+    return sourceSections
+      .map(section => compactSummaryBlock(section, perSectionLimit))
+      .join('\n\n')
+      .trim();
+  }
+  return compactSummaryBlock(text, maxChars);
 }
 
 function compactTeamSummariesForComprehensive(teamSummaries, options = {}) {
@@ -3244,6 +3341,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('⚠️ 来源标注规则（所有章节统一执行）：');
   parts.push('- 正文段落与普通 bullet 不写来源尾注；只在风险矩阵和附录的"来源会议"列中保留来源。');
   parts.push('- 单source团队表格来源格式：团队名-会议记录文件名，例如：SEED-20260507-项目周会-会议记录');
+  parts.push('- 归属以会议数据中的来源团队为准；支援部门会议即使正文提到某项目，也不得把该事实改挂到项目所属团队或其他团队。');
   if (msNames.length > 0) {
     parts.push(`- 多source团队（${msNames.join('、')}）表格来源格式：团队名-label-会议记录文件名，例如：经典剑侠系列-大部门-20260512-经典剑侠项目周例会`);
     parts.push('- label 必须严格来自 config.json 的 sources[].label；禁止使用会议标题中的【剧情】、【专项】等文本替代 label。');

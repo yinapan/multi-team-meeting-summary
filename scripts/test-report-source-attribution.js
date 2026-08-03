@@ -8,10 +8,13 @@ const {
   normalizeMultiSourceBulletPrefixes
 } = require('./shared');
 
+const today = new Date();
+const currentMonthDay = `${today.getMonth() + 1}月${today.getDate()}日`;
+
 const singleDoc = {
   name: '20260507-项目周会-会议记录.otl',
   conclusions: ['资源短缺风险需要重点跟进'],
-  todos: ['05月30日 complete resource coordination'],
+  todos: [`${currentMonthDay} complete resource coordination`],
   rawContent: '',
   sourceLabel: null
 };
@@ -79,6 +82,67 @@ assert.strictEqual(
     ['TeamA']
   ),
   '• 【TeamA-Label1】GPU crash needs owner follow-up（来源：TeamA-Label1-20260403_engine_weekly）'
+);
+
+assert.strictEqual(
+  normalizeMultiSourceBulletPrefixes(
+    '• 【ProjectTitle-Weekly】GPU crash needs owner follow-up（来源：ProjectTitle-20260403_engine_weekly）',
+    ['TeamA'],
+    { expectedLabels: { TeamA: 'Label1' } }
+  ),
+  '• 【TeamA-Label1】GPU crash needs owner follow-up（来源：TeamA-Label1-ProjectTitle-20260403_engine_weekly）'
+);
+
+assert.strictEqual(
+  normalizeMultiSourceBulletPrefixes(
+    '• 【高】GPU crash remains unresolved（来源：ProjectTitle-20260403_engine_weekly）',
+    ['TeamA'],
+    { expectedLabels: { TeamA: 'Label1' } }
+  ),
+  '• 【TeamA-Label1】【高】GPU crash remains unresolved（来源：TeamA-Label1-ProjectTitle-20260403_engine_weekly）'
+);
+
+assert.strictEqual(
+  normalizeMultiSourceBulletPrefixes(
+    [
+      '| 时间节点 | 责任方 | 关键事项 | 来源会议 |',
+      '|---|---|---|---|',
+      '| 08-10 | TeamA | Resolve GPU crash | FakeProject-FakeLabel-weekly |',
+    ].join('\n'),
+    ['TeamA'],
+    { expectedLabels: { TeamA: 'Label1' } }
+  ),
+  [
+    '| 时间节点 | 责任方 | 关键事项 | 来源会议 |',
+    '|---|---|---|---|',
+    '| 08-10 | TeamA | Resolve GPU crash | TeamA-Label1-FakeProject-FakeLabel-weekly |',
+  ].join('\n')
+);
+
+assert.strictEqual(
+  normalizeMultiSourceBulletPrefixes(
+    [
+      '| 时间节点 | 关键事项 | 来源会议 |',
+      '|---|---|---|',
+      '| 08-10 | Compare A \\| B | FakeProject-weekly |',
+    ].join('\n'),
+    ['TeamA'],
+    { expectedLabels: { TeamA: 'Label1' } }
+  ),
+  [
+    '| 时间节点 | 关键事项 | 来源会议 |',
+    '|---|---|---|',
+    '| 08-10 | Compare A \\| B | TeamA-Label1-FakeProject-weekly |',
+  ].join('\n')
+);
+
+assert.strictEqual(
+  normalizeMultiSourceBulletPrefixes(
+    '• Already canonical（来源：TeamA-Label1）',
+    ['TeamA'],
+    { expectedLabels: { TeamA: 'Label1' } }
+  ),
+  '• 【TeamA-Label1】Already canonical（来源：TeamA-Label1）'
 );
 
 console.log('report source attribution tests passed');

@@ -69,4 +69,49 @@ assert(compactPrompt.length < fullPrompt.length * 0.65, 'prompt is significantly
 assert(compactPrompt.includes('外网性能风险'), 'compact prompt keeps key risk');
 assert(compactPrompt.includes('素材审核排期'), 'compact prompt keeps another team risk');
 
+const multiSourceSummary = [
+  '## ProjectA',
+  ...Array.from({ length: 18 }, (_, i) =>
+    `• 【Team-ProjectA】ProjectA risk ${i} must be tracked.（来源：Team-ProjectA-A${i}）`
+  ),
+  '---',
+  '## ProjectB',
+  '• 【Team-ProjectB】ProjectB release decision must remain attributable.（来源：Team-ProjectB-B1）',
+].join('\n');
+
+const compactedMultiSource = compactTeamSummariesForComprehensive(
+  { Team: multiSourceSummary },
+  { maxCharsPerTeam: 900 }
+).Team;
+
+assert(compactedMultiSource.includes('## ProjectA'), 'keeps the first sourceLabel heading');
+assert(compactedMultiSource.includes('## ProjectB'), 'keeps every sourceLabel heading');
+assert(
+  compactedMultiSource.includes('ProjectB release decision'),
+  'reserves evidence budget for later sourceLabels instead of truncating them'
+);
+assert(compactedMultiSource.length <= 900, 'keeps the configured total character budget');
+
+const sixSourceSummary = Array.from({ length: 6 }, (_, i) => [
+  `## Project${i}`,
+  `• 【Team-Project${i}】Project${i} decision remains attributable and carries deliberately long supporting evidence ${'x'.repeat(120)}.（来源：Team-Project${i}-Doc）`,
+].join('\n')).join('\n---\n');
+const compactedSixSources = compactTeamSummariesForComprehensive(
+  { Team: sixSourceSummary },
+  { maxCharsPerTeam: 600 }
+).Team;
+assert(compactedSixSources.length <= 600, 'many sourceLabels do not exceed the total budget');
+for (let i = 0; i < 6; i++) {
+  assert(compactedSixSources.includes(`## Project${i}`), `keeps sourceLabel Project${i}`);
+  assert(
+    compactedSixSources.includes(`Project${i} decision`),
+    `keeps evidence for sourceLabel Project${i}`
+  );
+}
+
+assert(
+  compactPrompt.includes('支援部门会议即使正文提到某项目'),
+  'source-team ownership rule applies even when no multi-source team is active'
+);
+
 console.log('test-comprehensive-prompt-compression: ok');
