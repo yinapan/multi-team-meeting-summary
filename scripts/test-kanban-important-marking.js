@@ -5,8 +5,10 @@ const path = require('path');
 const {
   classifyImportantByParticipants,
   classifyImportantForCachedFile,
+  applyCachedImportantRecord,
   buildImportantSetFromTeamSummaries,
   applyImportantRecordsToMap,
+  refreshImportantMarkersAfterScan,
   scanImportantCandidateFiles,
   determineScanMode,
   parseKanbanDateRange,
@@ -628,6 +630,42 @@ assert.strictEqual(
   'current doc cache should mark historical kanban meetings with team leader participation'
 );
 
+fs.writeFileSync(
+  path.join(cachedDir, 'cached-ordinary.json'),
+  JSON.stringify({
+    mtime: 'm-ordinary',
+    content: '参会人员：张三、李四\n\n## 会议记录\n正文'
+  }),
+  'utf-8'
+);
+const cachedOrdinaryMap = new Map([['cached-ordinary-url', 'red']]);
+assert.strictEqual(
+  applyCachedImportantRecord(
+    cachedOrdinaryMap,
+    { name: cachedTeam },
+    {
+      id: 'cached-ordinary',
+      mtime: 'm-ordinary',
+      name: '20260411 - ordinary weekly.otl',
+      link: 'cached-ordinary-url'
+    },
+    redPeople,
+    { [cachedTeam]: 'TeamLeader' }
+  ),
+  true,
+  'a current cache should apply an authoritative ordinary classification'
+);
+assert.strictEqual(
+  cachedOrdinaryMap.has('cached-ordinary-url'),
+  true,
+  'an authoritative ordinary classification should remain distinguishable from an unknown meeting'
+);
+assert.strictEqual(
+  cachedOrdinaryMap.get('cached-ordinary-url'),
+  false,
+  'a current ordinary cache should clear a stale important level'
+);
+
 const treeCachedDir = path.join(__dirname, '..', 'cache', cachedTeam, 'tree', '2026年', '6月');
 fs.mkdirSync(treeCachedDir, { recursive: true });
 fs.writeFileSync(
@@ -693,6 +731,153 @@ assert.strictEqual(
 fs.rmSync(path.join(__dirname, '..', 'cache', cachedTeam), { recursive: true, force: true });
 
 async function runAsyncTests() {
+  const rateLimitedKanban = {
+    teams: [
+      {
+        name: '业务发展部',
+        weeks: {
+          '0727-0802': [
+            {
+              text: '20260730 - AI小游戏孵化周会',
+              title: '20260730-AI小游戏孵化周会',
+              url: 'recent-business-url',
+              important: false
+            }
+          ],
+          '0720-0726': [
+            {
+              text: '20260723 - 近期普通会议',
+              title: '20260723-近期普通会议',
+              url: 'recent-second-week-url',
+              important: false
+            }
+          ],
+          '0713-0719': [
+            {
+              text: '20260716 - 历史红色会议',
+              title: '20260716-历史红色会议',
+              url: 'historical-red-url',
+              important: 'red'
+            }
+          ]
+        }
+      }
+    ]
+  };
+  const rateLimitedImportantMap = new Map();
+  const rateLimitedPacer = {
+    forceRefresh: true,
+    getStats: () => ({ cacheRebuildUsed: true })
+  };
+  let refreshPacer = null;
+  let forceRefreshDuringImportantRefresh = null;
+  let refreshCandidateKeys = null;
+  await refreshImportantMarkersAfterScan(
+    {
+      teams: [{ name: '业务发展部', leader: '钟波' }]
+    },
+    redPeople,
+    { 业务发展部: '钟波' },
+    rateLimitedImportantMap,
+    rateLimitedKanban,
+    rateLimitedPacer,
+    {
+      refreshImportantRecords: async (_config, importantPeople, teamLeaders, importantMap, options) => {
+        refreshPacer = options.pacer;
+        forceRefreshDuringImportantRefresh = options.pacer.forceRefresh;
+        refreshCandidateKeys = options.candidateKeys;
+        applyImportantRecordsToMap(importantMap, [
+          {
+            team: '业务发展部',
+            title: '20260730-AI小游戏孵化周会',
+            url: 'recent-business-url',
+            content: '参会人员：孙红印、钟波、张三\n\n## 会议记录\n正文'
+          }
+        ], importantPeople, teamLeaders, true);
+        return { changed: 0, missing: 1, refreshed: 1, cachedApplied: 0 };
+      }
+    }
+  );
+  assert.strictEqual(
+    rateLimitedKanban.teams[0].weeks['0727-0802'][0].important,
+    'red',
+    'recent meetings should still recover red importance after the main scan falls back to cache'
+  );
+  assert.strictEqual(
+    refreshPacer,
+    rateLimitedPacer,
+    'important refresh should reuse the main scan pacer so rate-limit throttling is preserved'
+  );
+  assert.strictEqual(
+    forceRefreshDuringImportantRefresh,
+    false,
+    'important refresh should allow directory caches after the main scan has already forced a refresh'
+  );
+  assert.strictEqual(
+    rateLimitedPacer.forceRefresh,
+    true,
+    'important refresh should restore the main scan pacer state after it finishes'
+  );
+  assert.strictEqual(
+    refreshCandidateKeys.has('recent-business-url'),
+    true,
+    'cache-rebuild recovery should include meetings from the latest two weeks'
+  );
+  assert.strictEqual(
+    refreshCandidateKeys.has('historical-red-url'),
+    false,
+    'cache-rebuild recovery should not reread historical meetings outside the latest two weeks'
+  );
+  assert.strictEqual(
+    rateLimitedKanban.teams[0].weeks['0713-0719'][0].important,
+    'red',
+    'partial important refresh should preserve an existing marker that was not reclassified'
+  );
+
+  const explicitlyOrdinaryKanban = {
+    teams: [
+      {
+        name: '业务发展部',
+        weeks: {
+          '0727-0802': [
+            {
+              text: '20260729 - 已确认普通会议',
+              title: '20260729-已确认普通会议',
+              url: 'confirmed-ordinary-url',
+              important: 'red'
+            }
+          ]
+        }
+      }
+    ]
+  };
+  await refreshImportantMarkersAfterScan(
+    { teams: [{ name: '业务发展部', leader: '钟波' }] },
+    redPeople,
+    { 业务发展部: '钟波' },
+    new Map(),
+    explicitlyOrdinaryKanban,
+    null,
+    {
+      refreshImportantRecords: async (_config, importantPeople, teamLeaders, importantMap) => {
+        applyImportantRecordsToMap(importantMap, [
+          {
+            team: '业务发展部',
+            title: '20260729-已确认普通会议',
+            url: 'confirmed-ordinary-url',
+            content: '参会人员：张三、李四\n\n## 会议记录\n正文'
+          }
+        ], importantPeople, teamLeaders, true);
+        return { changed: 0, missing: 0, refreshed: 1, cachedApplied: 0 };
+      }
+    }
+  );
+  assert.strictEqual(
+    explicitlyOrdinaryKanban.teams[0].weeks['0727-0802'][0].important,
+    false,
+    'an authoritative ordinary classification should clear a stale important marker'
+  );
+
   const scanCalls = [];
   const scanned = await scanImportantCandidateFiles(
     {

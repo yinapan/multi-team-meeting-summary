@@ -878,23 +878,32 @@ function readDocCacheForFile(teamName, file) {
   return readCache(path.join(teamDocsCacheDir(teamName), `${file.id}.json`));
 }
 
-function classifyImportantForCachedFile(teamCfg, file, importantPeople, teamLeaders) {
-  if (!file || !file.id) return false;
+function findCachedImportantClassification(teamCfg, file, importantPeople, teamLeaders) {
+  if (!file || !file.id) return { found: false, level: false };
   const cached = readDocCacheForFile(teamCfg.name, file);
-  if (!cached || cached.mtime !== file.mtime || !cached.content) return false;
+  if (!cached || cached.mtime !== file.mtime || !cached.content) {
+    return { found: false, level: false };
+  }
   const participants = extractParticipants(cached.content);
   const leader = (teamLeaders || {})[teamCfg.name] || null;
-  return classifyImportantByParticipants(participants, importantPeople, leader);
+  return {
+    found: true,
+    level: classifyImportantByParticipants(participants, importantPeople, leader)
+  };
+}
+
+function classifyImportantForCachedFile(teamCfg, file, importantPeople, teamLeaders) {
+  return findCachedImportantClassification(teamCfg, file, importantPeople, teamLeaders).level;
 }
 
 function applyCachedImportantRecord(importantMap, teamCfg, file, importantPeople, teamLeaders) {
-  const level = classifyImportantForCachedFile(teamCfg, file, importantPeople, teamLeaders);
-  if (!level) return false;
+  const classification = findCachedImportantClassification(teamCfg, file, importantPeople, teamLeaders);
+  if (!classification.found) return false;
   setImportantLevel(importantMap, importantKeysForMeeting({
     name: file.name,
     title: file.name,
     url: file.link || ''
-  }), level);
+  }), classification.level, true);
   return true;
 }
 
@@ -1241,21 +1250,33 @@ function buildImportantSet(workspaceDir, importantPeople, teamLeaders) {
   return buildImportantSetFromTeamSummaries(teams, importantPeople, teamLeaders);
 }
 
-function isImportantMeeting(url, title, importantMap) {
-  if (url && importantMap.has(url)) return importantMap.get(url);
+function findImportantMeetingClassification(url, title, importantMap) {
+  if (url && importantMap.has(url)) return { found: true, level: importantMap.get(url) };
   const normalizedUrl = normalizeKdocsUrl(url);
-  if (normalizedUrl && importantMap.has(normalizedUrl)) return importantMap.get(normalizedUrl);
+  if (normalizedUrl && importantMap.has(normalizedUrl)) {
+    return { found: true, level: importantMap.get(normalizedUrl) };
+  }
   if (title) {
     const normalized = title.replace(/\.(\w+)$/i, '');
-    if (importantMap.has(normalized)) return importantMap.get(normalized);
+    if (importantMap.has(normalized)) return { found: true, level: importantMap.get(normalized) };
     const normalizedTitle = normalizeTitle(title);
-    if (importantMap.has(normalizedTitle)) return importantMap.get(normalizedTitle);
+    if (importantMap.has(normalizedTitle)) {
+      return { found: true, level: importantMap.get(normalizedTitle) };
+    }
     const matchTitle = normalizeForMatch(title);
-    if (matchTitle && importantMap.has(matchTitle)) return importantMap.get(matchTitle);
+    if (matchTitle && importantMap.has(matchTitle)) {
+      return { found: true, level: importantMap.get(matchTitle) };
+    }
     const matchNormalizedTitle = normalizeForMatch(normalizedTitle);
-    if (matchNormalizedTitle && importantMap.has(matchNormalizedTitle)) return importantMap.get(matchNormalizedTitle);
+    if (matchNormalizedTitle && importantMap.has(matchNormalizedTitle)) {
+      return { found: true, level: importantMap.get(matchNormalizedTitle) };
+    }
   }
-  return false;
+  return { found: false, level: false };
+}
+
+function isImportantMeeting(url, title, importantMap) {
+  return findImportantMeetingClassification(url, title, importantMap).level;
 }
 
 function applyImportantMarkersToKanbanData(kanbanData, importantMap, options = {}) {
@@ -1263,13 +1284,15 @@ function applyImportantMarkersToKanbanData(kanbanData, importantMap, options = {
   for (const team of kanbanData.teams || []) {
     for (const meetings of Object.values(team.weeks || {})) {
       for (const meeting of meetings) {
-        let level = isImportantMeeting(meeting.url, meeting.title, importantMap);
-        if (!level || level !== 'red') {
-          const altLevel = isImportantMeeting(meeting.url, meeting.text, importantMap);
-          if (altLevel === 'red' || (!level && altLevel)) level = altLevel;
+        let classification = findImportantMeetingClassification(meeting.url, meeting.title, importantMap);
+        if (classification.level !== 'red') {
+          const alternate = findImportantMeetingClassification(meeting.url, meeting.text, importantMap);
+          if (alternate.level === 'red' || (!classification.found && alternate.found)) {
+            classification = alternate;
+          }
         }
-        if (level || clearMissing) {
-          meeting.important = level;
+        if (classification.found || clearMissing) {
+          meeting.important = classification.level;
         }
       }
     }
@@ -1414,8 +1437,9 @@ async function scanImportantCandidateFiles(teamCfg, pacer, options = {}) {
   return allFiles;
 }
 
-async function refreshChangedImportantRecords(config, importantPeople, teamLeaders, importantMap) {
-  const pacer = new RequestPacer();
+async function refreshChangedImportantRecords(config, importantPeople, teamLeaders, importantMap, options = {}) {
+  const pacer = options.pacer || new RequestPacer();
+  const candidateKeys = options.candidateKeys instanceof Set ? options.candidateKeys : null;
   const changedFiles = [];
   const missingFiles = [];
   let cachedApplied = 0;
@@ -1425,6 +1449,10 @@ async function refreshChangedImportantRecords(config, importantPeople, teamLeade
 
     for (const file of files) {
       if (!isReadableForImportantRefresh(file)) continue;
+      if (candidateKeys) {
+        const fileKeys = importantKeysForMeeting({ ...file, url: file.link || file.url || '' });
+        if (!fileKeys.some(key => candidateKeys.has(key))) continue;
+      }
       const cached = readDocCacheForFile(teamCfg.name, file);
       if (!cached) {
         missingFiles.push({ teamCfg, file });
@@ -1457,6 +1485,69 @@ async function refreshChangedImportantRecords(config, importantPeople, teamLeade
   const records = (await runPool(tasks, Number(config.kdocs?.documentConcurrency) || 5)).filter(Boolean);
   applyImportantRecordsToMap(importantMap, records, importantPeople, teamLeaders, true);
   return { changed: changedFiles.length, missing: missingFiles.length, refreshed, cachedApplied };
+}
+
+function recentImportantCandidateKeys(kanbanData, weekCount = 2) {
+  const weekKeys = new Set();
+  for (const team of kanbanData?.teams || []) {
+    for (const weekKey of Object.keys(team.weeks || {})) {
+      if (parseWeekKey(weekKey)) weekKeys.add(weekKey);
+    }
+  }
+  const recentWeeks = new Set(
+    [...weekKeys]
+      .sort((a, b) => weekSortValue(a) - weekSortValue(b) || String(a).localeCompare(String(b)))
+      .slice(-weekCount)
+  );
+  const keys = new Set();
+  for (const team of kanbanData?.teams || []) {
+    for (const [weekKey, meetings] of Object.entries(team.weeks || {})) {
+      if (!recentWeeks.has(weekKey)) continue;
+      for (const meeting of meetings || []) {
+        for (const key of importantKeysForMeeting(meeting)) keys.add(key);
+      }
+    }
+  }
+  return keys;
+}
+
+async function refreshImportantMarkersAfterScan(
+  config,
+  importantPeople,
+  teamLeaders,
+  importantMap,
+  kanbanData,
+  scanPacer,
+  deps = {}
+) {
+  const scanStats = scanPacer && typeof scanPacer.getStats === 'function' ? scanPacer.getStats() : {};
+  if (scanStats.cacheRebuildUsed) {
+    console.log('⚠️ 检测到 KDocs 限流，主扫描已使用缓存；继续从正文缓存和可读取文档恢复重要标记。');
+  }
+
+  const refreshImportantRecords = deps.refreshImportantRecords || refreshChangedImportantRecords;
+  const candidateKeys = scanStats.cacheRebuildUsed ? recentImportantCandidateKeys(kanbanData) : null;
+  const hadForceRefresh = !!scanPacer && Object.prototype.hasOwnProperty.call(scanPacer, 'forceRefresh');
+  const previousForceRefresh = scanPacer && scanPacer.forceRefresh;
+  if (scanPacer) scanPacer.forceRefresh = false;
+
+  let refreshStats;
+  try {
+    refreshStats = await refreshImportantRecords(
+      config,
+      importantPeople,
+      teamLeaders,
+      importantMap,
+      { pacer: scanPacer, candidateKeys }
+    );
+  } finally {
+    if (scanPacer) {
+      if (hadForceRefresh) scanPacer.forceRefresh = previousForceRefresh;
+      else delete scanPacer.forceRefresh;
+    }
+  }
+  applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: false });
+  return refreshStats;
 }
 
 // ========== 从 kanbanData 中找最新日期 ==========
@@ -1763,28 +1854,29 @@ async function main() {
       scanPacer = incrementalResult.pacer || null;
     }
     console.log(`扫描完成，耗时 ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-    const scanStats = scanPacer && typeof scanPacer.getStats === 'function' ? scanPacer.getStats() : {};
-    if (scanStats.cacheRebuildUsed) {
-      console.log('⚠️ 检测到 KDocs 限流，跳过重要标记在线刷新，改用本地缓存补全。');
-    } else {
-      const refreshStats = await refreshChangedImportantRecords(config, importantPeople, teamLeaders, importantMap);
-      if (refreshStats.changed > 0) {
-        console.log(`重要标记依赖正文刷新: 检测 ${refreshStats.changed} 篇变更，刷新 ${refreshStats.refreshed} 篇`);
-      }
-      if (refreshStats.missing > 0) {
-        console.log(`重要标记缺失正文补拉: 检测 ${refreshStats.missing} 篇缺缓存，成功 ${refreshStats.refreshed} 篇`);
-      }
-      if (refreshStats.cachedApplied > 0) {
-        console.log(`重要标记本地缓存补全: ${refreshStats.cachedApplied} 篇`);
-      }
+    const refreshStats = await refreshImportantMarkersAfterScan(
+      config,
+      importantPeople,
+      teamLeaders,
+      importantMap,
+      kanbanData,
+      scanPacer
+    );
+    if (refreshStats.changed > 0) {
+      console.log(`重要标记依赖正文刷新: 检测 ${refreshStats.changed} 篇变更，刷新 ${refreshStats.refreshed} 篇`);
     }
-    applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: true });
+    if (refreshStats.missing > 0) {
+      console.log(`重要标记缺失正文补拉: 检测 ${refreshStats.missing} 篇缺缓存，成功 ${refreshStats.refreshed} 篇`);
+    }
+    if (refreshStats.cachedApplied > 0) {
+      console.log(`重要标记本地缓存补全: ${refreshStats.cachedApplied} 篇`);
+    }
   }
 
   if (config) {
     const cacheKanbanData = buildKanbanDataFromDocCache(workspaceDir, config, importantMap);
     kanbanData = enrichKanbanFromDocCache(kanbanData, cacheKanbanData);
-    applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: true });
+    applyImportantMarkersToKanbanData(kanbanData, importantMap, { clearMissing: false });
   }
 
   const writtenDataFile = writeOutputJson(DATA_FILE, kanbanData);
@@ -1829,6 +1921,7 @@ module.exports = {
   generateHtml,
   classifyImportantByParticipants,
   classifyImportantForCachedFile,
+  applyCachedImportantRecord,
   applyImportantRecordsToMap,
   buildImportantSetFromTeamSummaries,
   buildImportantSet,
@@ -1850,6 +1943,7 @@ module.exports = {
   pruneMeetingsWithoutConcreteDate,
   scanImportantCandidateFiles,
   refreshChangedImportantRecords,
+  refreshImportantMarkersAfterScan,
   fullScan,
   incrementalScan
 };
