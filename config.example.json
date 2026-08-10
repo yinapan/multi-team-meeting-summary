@@ -1,4 +1,7 @@
 {
+  "storage": {
+    "provider": "wps365"
+  },
   "version": "1.0.0",
   "org_name": "",
   "kdocs": {
@@ -18,6 +21,10 @@
     "hybridFolderThreshold": 5,
     "hybridRecursiveTeams": ["运营发行中心", "行政管理部"],
     "hybridRecursiveLabels": ["K2运营发行部"]
+  },
+  "wps365": {
+    "cliPath": "",
+    "contentFormat": "markdown"
   },
   "report": {
     "perDocumentItemLimit": 5,

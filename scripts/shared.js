@@ -2,6 +2,21 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execFile, execFileSync } = require('child_process');
+const {
+  getWps365CliPath,
+  getWps365CliEnv,
+  runWps365Cli,
+  runWps365CliSync,
+  parseWps365Json,
+  getWps365ResponseData,
+  getWps365ApiError,
+  getWps365FileList,
+  unwrapWps365SearchItem,
+  buildWps365ListArgs,
+  buildWps365SearchArgs,
+  buildWps365ContentArgs,
+  extractWps365Content
+} = require('./wps365-client');
 
 let cachedSkillConfig = null;
 
@@ -18,6 +33,24 @@ function getSkillConfig() {
 
 function getKdocsConfig() {
   return getSkillConfig().kdocs || {};
+}
+
+function getStorageProvider() {
+  const config = getSkillConfig();
+  const configured = process.env.MEETING_SUMMARY_STORAGE_PROVIDER
+    || process.env.WPS365_PROVIDER
+    || config.storage?.provider
+    || config.kdocs?.provider
+    || '';
+  return String(configured || 'kdocs').toLowerCase();
+}
+
+function isWps365Provider() {
+  return getStorageProvider() === 'wps365';
+}
+
+function getWps365Config() {
+  return getSkillConfig().wps365 || {};
 }
 
 function getKdocsCliPath() {
@@ -783,22 +816,33 @@ function listFolder(driveId, parentId, teamName, _folderPath = '') {
   const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const raw = execFileSync(getKdocsCliPath(), getKdocsCliArgs(['drive', 'list-files', '--output', 'json']), {
-        input: inputJson, encoding: 'utf-8', timeout: 15000, windowsHide: true, env: getKdocsCliEnv()
-      });
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.code && parsed.code !== 0) {
-        if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
+      const result = isWps365Provider()
+        ? runWps365CliSync(buildWps365ListArgs({ driveId, parentId, pageSize: 500 }), {
+          config: getWps365Config(), timeout: 15000
+        })
+        : { error: null, stdout: execFileSync(getKdocsCliPath(), getKdocsCliArgs(['drive', 'list-files', '--output', 'json']), {
+          input: inputJson, encoding: 'utf-8', timeout: 15000, windowsHide: true, env: getKdocsCliEnv()
+        }) };
+      if (result.error && !result.stdout) throw new Error(result.error);
+      const parsed = isWps365Provider() ? parseWps365Json(result.stdout) : JSON.parse(result.stdout);
+      const apiError = isWps365Provider()
+        ? getWps365ApiError(parsed)
+        : (parsed && parsed.code && parsed.code !== 0 ? { code: parsed.code } : null);
+      if (apiError) {
+        const errorCode = apiError.code;
+        if (RETRY_CODES.has(errorCode) && attempt < MAX_RETRIES) {
           const delay = retryDelay(attempt);
-          process.stderr.write(`[listFolder] 限流 folder=${parentId} code=${parsed.code}，${(delay / 1000).toFixed(0)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...\n`);
+          process.stderr.write(`[listFolder] 限流 folder=${parentId} code=${errorCode}，${(delay / 1000).toFixed(0)}s 后重试 (${attempt + 1}/${MAX_RETRIES})...\n`);
           sleepSync(delay);
           continue;
         }
-        process.stderr.write(`[listFolder] API错误 folder=${parentId} code=${parsed.code}\n`);
+        process.stderr.write(`[listFolder] API错误 folder=${parentId} code=${errorCode}\n`);
         if (cached) return cached.items;
         return [];
       }
-      const items = (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
+      const items = isWps365Provider()
+        ? getWps365FileList(parsed).items
+        : (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
       writeCache(cacheFile, { items, fetched_at: Date.now() });
       if (_folderPath) writeTreeFolderListing(teamName, _folderPath, items);
       return items;
@@ -1213,6 +1257,21 @@ async function pacedKdocsCli(pacer, args, inputJson, timeout, kind = 'requests',
   }
 }
 
+async function pacedWps365Cli(pacer, args, timeout, kind = 'requests', beforeSpawn = null) {
+  if (!pacer) return runWps365Cli(args, { config: getWps365Config(), timeout });
+  await pacer.acquire();
+  try {
+    if (typeof beforeSpawn === 'function') {
+      const skipped = beforeSpawn();
+      if (skipped) return skipped;
+    }
+    if (typeof pacer.noteRequest === 'function') pacer.noteRequest(kind);
+    return await runWps365Cli(args, { config: getWps365Config(), timeout });
+  } finally {
+    pacer.release();
+  }
+}
+
 async function listFolderAsync(driveId, parentId, teamName, pacer, _folderPath = '') {
   const cacheFile = path.join(teamFoldersCacheDir(teamName), `${driveId}_${parentId}.json`);
   const cached = readCache(cacheFile);
@@ -1223,13 +1282,16 @@ async function listFolderAsync(driveId, parentId, teamName, pacer, _folderPath =
 
   const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const { error, stdout } = await pacedKdocsCli(
-      pacer,
-      ['drive', 'list-files', '--output', 'json'],
-      inputJson,
-      15000,
-      'list'
-    );
+    const result = isWps365Provider()
+      ? await pacedWps365Cli(pacer, buildWps365ListArgs({ driveId, parentId, pageSize: 500 }), 15000, 'list')
+      : await pacedKdocsCli(
+        pacer,
+        ['drive', 'list-files', '--output', 'json'],
+        inputJson,
+        15000,
+        'list'
+      );
+    const { error, stdout } = result;
     if (error && !stdout) {
       if (attempt < MAX_RETRIES) {
         if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
@@ -1245,16 +1307,20 @@ async function listFolderAsync(driveId, parentId, teamName, pacer, _folderPath =
     }
     try {
       const parsed = JSON.parse(stdout);
-      if (parsed && parsed.code && parsed.code !== 0) {
-        if (RETRY_CODES.has(parsed.code) && attempt < MAX_RETRIES) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(parsed.code));
+      const apiError = isWps365Provider()
+        ? getWps365ApiError(parsed)
+        : (parsed && parsed.code && parsed.code !== 0 ? { code: parsed.code } : null);
+      if (apiError) {
+        const errorCode = apiError.code;
+        if (RETRY_CODES.has(errorCode) && attempt < MAX_RETRIES) {
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(errorCode));
           if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
           const delay = retryDelay(attempt);
-          process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${parsed.code}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
+          process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${errorCode}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
           await sleep(delay);
           continue;
         }
-        process.stderr.write(`[listFolderAsync] API error folder=${parentId} code=${parsed.code}\n`);
+        process.stderr.write(`[listFolderAsync] API error folder=${parentId} code=${errorCode}\n`);
         if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
         if (cached) {
           if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
@@ -1262,7 +1328,9 @@ async function listFolderAsync(driveId, parentId, teamName, pacer, _folderPath =
         }
         return [];
       }
-      const items = (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
+      const items = isWps365Provider()
+        ? getWps365FileList(parsed).items
+        : (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
       if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
       writeCache(cacheFile, { items, fetched_at: Date.now() });
       if (_folderPath) writeTreeFolderListing(teamName, _folderPath, items);
@@ -1422,6 +1490,71 @@ async function readDocOnceAsync(driveId, fileId, mtime, ctime, teamName, pacer, 
       writeCache(treeFile, { ...cached, folderPath: folderPath || cached.folderPath || '' });
     }
     return cached.content;
+  }
+
+  if (isWps365Provider()) {
+    if (pacer) await pacer.acquire();
+    try {
+      if (pacer && typeof pacer.noteRequest === 'function') pacer.noteRequest('read');
+      const result = await runWps365Cli(
+        buildWps365ContentArgs({
+          driveId,
+          fileId,
+          format: getWps365Config().contentFormat || 'markdown'
+        }),
+        { config: getWps365Config(), timeout: 30000 }
+      );
+      if (result.error && !result.stdout) {
+        process.stderr.write(`[readDoc] WPS 365 失败 file=${fileId}: ${result.error.substring(0, 100)}\n`);
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+        return cached && cached.content ? cached.content : '';
+      }
+
+      let parsed;
+      try {
+        parsed = parseWps365Json(result.stdout);
+      } catch (error) {
+        process.stderr.write(`[readDoc] WPS 365 JSON 解析失败 file=${fileId}: ${error.message.substring(0, 80)}\n`);
+        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+        return cached && cached.content ? cached.content : '';
+      }
+
+      const apiError = getWps365ApiError(parsed);
+      if (apiError) {
+        process.stderr.write(`[readDoc] WPS 365 API error file=${fileId} code=${apiError.code}\n`);
+        if (cached && cached.content) {
+          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
+          return cached.content;
+        }
+        return '';
+      }
+
+      const content = extractWps365Content(parsed);
+      const cacheData = {
+        content,
+        mtime,
+        ctime,
+        url: fileUrl || '',
+        folderName: folderName || '',
+        folderPath: folderPath || '',
+        fetched_at: Date.now()
+      };
+      if (!content) {
+        cacheData.unreadable = true;
+        process.stderr.write(`[readDoc] WPS 365 returned no text file=${fileId} url=${fileUrl || ''}\n`);
+      } else if (pacer && typeof pacer.noteSuccess === 'function') {
+        pacer.noteSuccess();
+      }
+      if (folderPath) {
+        writeCache(treeFile, cacheData);
+        writeCache(flatFile, cacheData);
+      } else {
+        writeCache(flatFile, cacheData);
+      }
+      return content;
+    } finally {
+      if (pacer) pacer.release();
+    }
   }
 
   if (pacer) await pacer.acquire();
@@ -1728,13 +1861,21 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
     let lastCode = null;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const { error, stdout } = await pacedKdocsCli(
-        pacer,
-        ['drive', 'search-files', '--output', 'json'],
-        JSON.stringify(inputObj),
-        30000,
-        'search'
-      );
+      const result = isWps365Provider()
+        ? await pacedWps365Cli(
+          pacer,
+          buildWps365SearchArgs({ ...opts, page_token: pageToken }),
+          30000,
+          'search'
+        )
+        : await pacedKdocsCli(
+          pacer,
+          ['drive', 'search-files', '--output', 'json'],
+          JSON.stringify(inputObj),
+          30000,
+          'search'
+        );
+      const { error, stdout } = result;
 
         if (error && !stdout) {
           if (attempt < MAX_RETRIES) {
@@ -1764,10 +1905,13 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
         throw new Error(`search-files JSON parse failed: ${e.message.substring(0, 100)}`);
       }
 
-      if (parsed && parsed.code && parsed.code !== 0) {
-        lastCode = parsed.code;
-        if (RETRY_CODES.has(parsed.code)) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(parsed.code));
+      const apiError = isWps365Provider()
+        ? getWps365ApiError(parsed)
+        : (parsed && parsed.code && parsed.code !== 0 ? { code: parsed.code } : null);
+      if (apiError) {
+        lastCode = apiError.code;
+        if (RETRY_CODES.has(apiError.code)) {
+          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(apiError.code));
           if (attempt < MAX_RETRIES) {
             if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
             await sleep(retryDelay(attempt));
@@ -1779,20 +1923,22 @@ async function searchFilesAsyncRateLimited(opts, teamName, pacer) {
             process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code} after retries, using stale cache\n`);
             return cached.items;
           }
-          process.stderr.write(`[searchFilesAsync] rate limited code=${parsed.code}, no cache available\n`);
+          process.stderr.write(`[searchFilesAsync] rate limited code=${apiError.code}, no cache available\n`);
           return [];
         }
-        const msg = parsed.message || parsed.msg || parsed.error || '';
+        const msg = apiError.message || parsed.message || parsed.msg || parsed.error || '';
         const detail = parsed.detail || parsed.data?.message || parsed.data?.msg || '';
         const suffix = [msg, detail].filter(Boolean).join(' ');
         if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-        throw new Error(`search-files API error code=${parsed.code}${suffix ? `: ${suffix.substring(0, 200)}` : ''}`);
+        throw new Error(`search-files API error code=${apiError.code}${suffix ? `: ${suffix.substring(0, 200)}` : ''}`);
       }
 
-      const data = (parsed && parsed.data && parsed.data.data) || {};
+      const data = isWps365Provider()
+        ? getWps365ResponseData(parsed)
+        : (parsed && parsed.data && parsed.data.data) || {};
       const items = data.items || [];
       for (const item of items) {
-        const file = item.file || item;
+        const file = isWps365Provider() ? unwrapWps365SearchItem(item) : (item.file || item);
         allItems.push({
             ...normalizeKdocsFile(file, opts.drive_ids.length === 1 ? opts.drive_ids[0] : '')
         });
@@ -3764,7 +3910,8 @@ module.exports = {
   scanFolderAsync, scanFolderWithStatsAsync, scanFolderAllAsync, scanFolderFromDateAsync,
   getKdocsScanMode, shouldHybridRecursiveScan, scanFilesByMode, scanAllTeams, dedupeKdocsFiles,
   readDocOnceAsync, readDocAsync, runPool,
-  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, classifyRateLimitCode,
+  RequestPacer, sleep, getSkillConfig, getKdocsConfig, getStorageProvider, getWps365Config,
+  getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, getWps365CliPath, getWps365CliEnv, classifyRateLimitCode,
   formatGenerationMode, printAiReviewWarning,
   getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   normalizeTitle, normalizeForMatch, charSimilarity,

@@ -1,6 +1,21 @@
 ﻿# 多团队会议记录汇总分析工具
 
-从 KDocs 云文档递归扫描会议记录，按日期生成综合会议记录汇总分析报告，并生成会议记录看板。
+从 WPS 365 云文档递归扫描会议记录，按日期生成综合会议记录汇总分析报告，并生成会议记录看板。
+
+## WPS 365 接入
+
+本项目已从旧 KDocs CLI 切换到 WPS 365 CLI，目录扫描、搜索和正文读取继续复用原有缓存。
+
+首次使用时完成 CLI 安装和授权：
+
+```powershell
+irm https://raw.githubusercontent.com/wps365-open/cli/main/install.ps1 | iex
+wps365-cli config init
+wps365-cli auth login --device
+wps365-cli auth status
+```
+
+Windows 默认从 `%USERPROFILE%\.wps365\bin\wps365-cli.exe` 启动 CLI。也可以在 `config.json` 的 `wps365.cliPath` 或环境变量 `WPS365_CLI_PATH` 中指定路径。临时回退旧适配器可设置 `MEETING_SUMMARY_STORAGE_PROVIDER=kdocs`。
 
 ## 保留的业务入口
 
@@ -18,7 +33,7 @@ node scripts/generate-report.js 05-11 05-24
 
 该入口会完整执行主流程：
 
-1. 递归扫描 `config.json` 中每个团队的 KDocs 根目录。
+1. 递归扫描 `config.json` 中每个团队的 WPS 365 根目录。
 2. 按标题日期或正文会议日期过滤到指定日期范围。
 3. 读取会议正文并生成统一数据基线。
 4. 生成团队 LLM 摘要，供综合报告汇总使用。
@@ -115,7 +130,7 @@ outputs/meeting-baseline-<start>-<end>.json
 
 ## 配置
 
-`config.json` 存放 KDocs token、团队根目录和 LLM 配置，已被 `.gitignore` 排除，不能提交。
+`config.json` 存放 WPS 365 provider、团队根目录和 LLM 配置，已被 `.gitignore` 排除，不能提交。旧 `kdocs.token` 可以暂时保留用于回退，但新适配器使用 WPS 365 CLI 自己的授权存储。
 
 新增团队或目录时，维护 `config.json` 中的团队 `root_folder_id` 即可。系统默认递归扫描根目录，新增月份或子目录不需要额外写扫描逻辑。
 
