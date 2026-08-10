@@ -12,7 +12,10 @@ function getWps365CliPath(config = {}) {
 }
 
 function getWps365CliEnv(config = {}) {
-  return { ...process.env, ...(config.env || {}) };
+  const env = { ...process.env, ...(config.env || {}) };
+  const accessToken = env.WPS365_ACCESS_TOKEN || config.accessToken || config.token;
+  if (accessToken) env.WPS365_ACCESS_TOKEN = accessToken;
+  return env;
 }
 
 function buildWps365Args(args = [], output = 'json') {

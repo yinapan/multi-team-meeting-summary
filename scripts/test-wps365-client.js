@@ -1,6 +1,7 @@
 const assert = require('assert');
 const {
   buildWps365Args,
+  getWps365CliEnv,
   buildWps365ListArgs,
   buildWps365SearchArgs,
   buildWps365ContentArgs,
@@ -13,6 +14,11 @@ const {
 assert.deepStrictEqual(
   buildWps365Args(['drive', 'files', 'list']),
   ['--output', 'json', '--no-color', '--quiet', 'drive', 'files', 'list']
+);
+assert.strictEqual(getWps365CliEnv({ accessToken: 'config-token' }).WPS365_ACCESS_TOKEN, 'config-token');
+assert.strictEqual(
+  getWps365CliEnv({ accessToken: 'config-token', env: { WPS365_ACCESS_TOKEN: 'env-token' } }).WPS365_ACCESS_TOKEN,
+  'env-token'
 );
 assert.deepStrictEqual(
   buildWps365ListArgs({ driveId: 'drive-1', parentId: 'folder-1', pageSize: 50, pageToken: 'next' }),
