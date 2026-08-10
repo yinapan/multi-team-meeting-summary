@@ -7,7 +7,7 @@ function main() {
   execFileSync(process.execPath, [path.join(__dirname, 'generate-kanban.js'), '--full', ...extraArgs], {
     cwd: path.resolve(__dirname, '..'),
     stdio: 'inherit',
-    timeout: 900000,
+    timeout: 1800000,
     env: process.env
   });
   const elapsedSec = Number(((Date.now() - startedAt) / 1000).toFixed(1));

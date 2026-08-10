@@ -868,7 +868,8 @@ function normalizeKdocsFile(item, driveId) {
     id: item.id,
     link: item.link || item.link_url || item.url || '',
     size: item.size,
-    drive_id: item.drive_id || driveId || '',
+    // The configured drive is authoritative; cached items may carry a legacy drive id.
+    drive_id: driveId || item.drive_id || '',
     mtime: item.mtime,
     ctime: item.ctime,
     parent_id: item.parent_id || '',
