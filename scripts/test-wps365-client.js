@@ -1,6 +1,7 @@
 const assert = require('assert');
 const {
   buildWps365Args,
+  getWps365CliPath,
   getWps365CliEnv,
   buildWps365ListArgs,
   buildWps365SearchArgs,
@@ -19,6 +20,25 @@ assert.strictEqual(getWps365CliEnv({ accessToken: 'config-token' }).WPS365_ACCES
 assert.strictEqual(
   getWps365CliEnv({ accessToken: 'config-token', env: { WPS365_ACCESS_TOKEN: 'env-token' } }).WPS365_ACCESS_TOKEN,
   'env-token'
+);
+assert.strictEqual(
+  getWps365CliPath({}, {
+    platform: 'win32',
+    homeDir: 'C:\\Users\\test-user',
+    localAppData: 'C:\\Users\\test-user\\AppData\\Local',
+    pathExists: candidate => candidate === 'C:\\Users\\test-user\\AppData\\Local\\wps365-cli\\bin\\wps365-cli.exe'
+  }),
+  'C:\\Users\\test-user\\AppData\\Local\\wps365-cli\\bin\\wps365-cli.exe'
+);
+assert.strictEqual(
+  getWps365CliPath({}, {
+    platform: 'win32',
+    homeDir: 'C:\\Users\\test-user',
+    localAppData: 'C:\\Users\\test-user\\AppData\\Local',
+    pathEnv: 'C:\\Tools;C:\\Users\\test-user\\AppData\\Local\\Custom WPS',
+    pathExists: candidate => candidate === 'C:\\Users\\test-user\\AppData\\Local\\Custom WPS\\wps365-cli.exe'
+  }),
+  'C:\\Users\\test-user\\AppData\\Local\\Custom WPS\\wps365-cli.exe'
 );
 assert.deepStrictEqual(
   buildWps365ListArgs({ driveId: 'drive-1', parentId: 'folder-1', pageSize: 50, pageToken: 'next' }),

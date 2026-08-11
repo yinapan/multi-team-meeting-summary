@@ -15,7 +15,7 @@ wps365-cli auth login --device
 wps365-cli auth status
 ```
 
-Windows 默认从 `%USERPROFILE%\.wps365\bin\wps365-cli.exe` 启动 CLI。也可以在 `config.json` 的 `wps365.cliPath` 或环境变量 `WPS365_CLI_PATH` 中指定路径。临时回退旧适配器可设置 `MEETING_SUMMARY_STORAGE_PROVIDER=kdocs`。
+Windows 会优先检查 `%USERPROFILE%\.wps365\bin\wps365-cli.exe`，并自动探测 `%LOCALAPPDATA%` 下的常见 WPS 365 CLI 安装目录。也可以在 `config.json` 的 `wps365.cliPath` 或环境变量 `WPS365_CLI_PATH` 中指定路径。临时回退旧适配器可设置 `MEETING_SUMMARY_STORAGE_PROVIDER=kdocs`。
 
 ## 保留的业务入口
 

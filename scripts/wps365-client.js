@@ -1,14 +1,42 @@
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 const { execFileSync, spawn } = require('child_process');
 
-function getWps365CliPath(config = {}) {
+function getWps365CliCandidates(config = {}, runtime = {}) {
   const configured = config.cliPath || process.env.WPS365_CLI_PATH;
-  if (configured) return configured;
-  if (process.platform === 'win32') {
-    return path.join(os.homedir(), '.wps365', 'bin', 'wps365-cli.exe');
-  }
-  return 'wps365-cli';
+  if (configured) return [configured];
+  const platform = runtime.platform || process.platform;
+  if (platform !== 'win32') return ['wps365-cli'];
+
+  const homeDir = runtime.homeDir || os.homedir();
+  const join = path.win32.join;
+  const localAppData = runtime.localAppData
+    || process.env.LOCALAPPDATA
+    || join(homeDir, 'AppData', 'Local');
+  const pathEnv = runtime.pathEnv || process.env.Path || process.env.PATH || '';
+  const pathCandidates = pathEnv
+    .split(';')
+    .map(entry => entry.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean)
+    .map(entry => join(entry, 'wps365-cli.exe'));
+
+  return [
+    join(homeDir, '.wps365', 'bin', 'wps365-cli.exe'),
+    join(localAppData, 'wps365-cli', 'bin', 'wps365-cli.exe'),
+    join(localAppData, 'wps365', 'bin', 'wps365-cli.exe'),
+    join(localAppData, 'wps365-cli', 'wps365-cli.exe'),
+    join(localAppData, 'wps365', 'wps365-cli.exe'),
+    join(localAppData, 'wps365-cli.exe'),
+    ...pathCandidates
+  ];
+}
+
+function getWps365CliPath(config = {}, runtime = {}) {
+  const candidates = getWps365CliCandidates(config, runtime);
+  if (candidates.length === 1) return candidates[0];
+  const pathExists = runtime.pathExists || fs.existsSync;
+  return candidates.find(candidate => pathExists(candidate)) || candidates[0];
 }
 
 function getWps365CliEnv(config = {}) {
@@ -168,6 +196,7 @@ function extractWps365Content(payload) {
 
 module.exports = {
   getWps365CliPath,
+  getWps365CliCandidates,
   getWps365CliEnv,
   buildWps365Args,
   runWps365Cli,
