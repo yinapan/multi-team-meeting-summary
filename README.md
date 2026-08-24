@@ -15,7 +15,15 @@ wps365-cli auth login --device
 wps365-cli auth status
 ```
 
+CLI 会保存 refresh token，并在 access token 过期后自动续期。不要把短效 access token 写入 `config.json`；仅在临时调试时通过环境变量 `WPS365_ACCESS_TOKEN` 覆盖认证。
+
 Windows 会优先检查 `%USERPROFILE%\.wps365\bin\wps365-cli.exe`，并自动探测 `%LOCALAPPDATA%` 下的常见 WPS 365 CLI 安装目录。也可以在 `config.json` 的 `wps365.cliPath` 或环境变量 `WPS365_CLI_PATH` 中指定路径。临时回退旧适配器可设置 `MEETING_SUMMARY_STORAGE_PROVIDER=kdocs`。
+
+### Windows / OpenClaw 新机器迁移
+
+将完整仓库复制或克隆到新机器，然后双击根目录的 `setup-wps365.bat`。脚本会安装项目依赖和 WPS 365 CLI、绑定应用、要求一次“高晶娣”设备授权、验证文档读取权限，并将 `multi-team-meeting-summary` Skill 安装到 `%USERPROFILE%\.openclaw\skills`。完成后重启一次 OpenClaw。
+
+`config.portable.json` 保存团队目录等可迁移配置，但不包含 WPS/KDocs token。需要更新迁移模板时，在已配置机器运行 `npm run config:portable`。
 
 ## 保留的业务入口
 

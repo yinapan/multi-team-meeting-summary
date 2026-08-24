@@ -39,11 +39,10 @@ function getWps365CliPath(config = {}, runtime = {}) {
   return candidates.find(candidate => pathExists(candidate)) || candidates[0];
 }
 
-function getWps365CliEnv(config = {}) {
-  const env = { ...process.env, ...(config.env || {}) };
-  const accessToken = env.WPS365_ACCESS_TOKEN || config.accessToken || config.token;
-  if (accessToken) env.WPS365_ACCESS_TOKEN = accessToken;
-  return env;
+function getWps365CliEnv(config = {}, processEnv = process.env) {
+  const configEnv = { ...(config.env || {}) };
+  delete configEnv.WPS365_ACCESS_TOKEN;
+  return { ...processEnv, ...configEnv };
 }
 
 function buildWps365Args(args = [], output = 'json') {

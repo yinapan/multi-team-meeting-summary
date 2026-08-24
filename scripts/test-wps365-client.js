@@ -16,9 +16,12 @@ assert.deepStrictEqual(
   buildWps365Args(['drive', 'files', 'list']),
   ['--output', 'json', '--no-color', '--quiet', 'drive', 'files', 'list']
 );
-assert.strictEqual(getWps365CliEnv({ accessToken: 'config-token' }).WPS365_ACCESS_TOKEN, 'config-token');
 assert.strictEqual(
-  getWps365CliEnv({ accessToken: 'config-token', env: { WPS365_ACCESS_TOKEN: 'env-token' } }).WPS365_ACCESS_TOKEN,
+  getWps365CliEnv({ accessToken: 'expired-config-token' }, {}).WPS365_ACCESS_TOKEN,
+  undefined
+);
+assert.strictEqual(
+  getWps365CliEnv({ accessToken: 'expired-config-token' }, { WPS365_ACCESS_TOKEN: 'env-token' }).WPS365_ACCESS_TOKEN,
   'env-token'
 );
 assert.strictEqual(
