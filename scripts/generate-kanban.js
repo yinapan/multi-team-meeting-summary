@@ -785,6 +785,44 @@ function initFixedHorizontalScrollbar() {
   window.addEventListener('resize', updateFixedHorizontalScrollbar);
 }
 
+function positionAtLatestWeek() {
+  const tableScroll = document.querySelector('.table-scroll');
+  if (!tableScroll) return;
+  tableScroll.scrollLeft = Math.max(0, tableScroll.scrollWidth - tableScroll.clientWidth);
+}
+
+function initPageWheelForwarding() {
+  const tableScroll = document.querySelector('.table-scroll');
+  if (!tableScroll) return;
+
+  document.addEventListener('wheel', e => {
+    if (!e.deltaY && !e.deltaX) return;
+    if (e.ctrlKey) return;
+
+    const target = e.target instanceof Element ? e.target : null;
+    const nestedScroll = target && target.closest('.multi-panel');
+    if (nestedScroll && nestedScroll.scrollHeight > nestedScroll.clientHeight) return;
+
+    e.preventDefault();
+
+    if (e.shiftKey) {
+      tableScroll.scrollBy({ left: e.deltaY || e.deltaX, behavior: 'auto' });
+      return;
+    }
+
+    if (e.deltaX) {
+      tableScroll.scrollBy({ left: e.deltaX, behavior: 'auto' });
+    }
+
+    const hasVerticalOverflow = tableScroll.scrollHeight > tableScroll.clientHeight + 1;
+    if (hasVerticalOverflow) {
+      tableScroll.scrollBy({ top: e.deltaY, behavior: 'auto' });
+    } else {
+      window.scrollBy({ top: e.deltaY, behavior: 'auto' });
+    }
+  }, { passive: false });
+}
+
 function render() {
   renderHead();
   renderBody();
@@ -793,8 +831,10 @@ function render() {
 
 initControls();
 initFixedHorizontalScrollbar();
+initPageWheelForwarding();
 renderStats();
 render();
+requestAnimationFrame(positionAtLatestWeek);
 </script>
 </body>
 </html>`;
