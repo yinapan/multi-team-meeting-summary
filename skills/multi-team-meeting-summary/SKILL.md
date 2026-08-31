@@ -35,4 +35,10 @@ If it fails, stop after the first authentication or permission error. Ask the us
 
 For reports, titles marked `【保密】`, `[保密]`, or with equivalent full-width square brackets must be excluded before reading and from all counts, summaries, important-meeting lists, and generated reports. Confidential status always overrides an important marker or important attendee.
 
-Treat WPS access as read-only unless the user explicitly asks to create or modify a document. After generation, report output paths, team count, meeting count, and any failed reads. Do not describe a cached or permission-incomplete result as a successful full scan.
+## Required Delivery
+
+After a requested report or dashboard finishes, invoke the installed `s3-file-manager` skill to upload the primary artifacts before replying. Publish the comprehensive report and dashboard by default; publish per-team reports only when requested. Use the agent id required by `s3-file-manager` (normally `openclaw-agent-001`).
+
+For each returned `download_url`, run `npm run kanban:shorten -- "<download_url>"` and return the resulting short URL as the primary user-facing link. State that the underlying S3 link expires in 7 days. Dashboard and report links must be shorter than 300 characters. Also include the local output paths. If upload or shortening fails, report the failure clearly and never imply that a link was generated.
+
+Treat WPS access as read-only unless the user explicitly asks to create or modify a document. After generation, report output paths, links, team count, meeting count, and any failed reads. Do not describe a cached or permission-incomplete result as a successful full scan.

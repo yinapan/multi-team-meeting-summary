@@ -119,6 +119,8 @@ npm run kanban:shorten -- "<发布后的长看板链接>"
 
 默认输出 `https://tinyurl.com/<id>` 短链接，失败时回退 CleanURI。看板页面首次打开会自动定位到最新周；鼠标在页面其他区域滚动时，也会驱动看板上下滚动，按住 Shift 滚轮可横向滚动。
 
+OpenClaw 生成主报告和看板后，应调用已安装的 `s3-file-manager` Skill 上传文件，再用本命令压缩其 `download_url`。底层 S3 下载地址有效期为 7 天。
+
 ## 数据口径
 
 报告和看板共用同一套扫描入口：默认使用团队 `root_folder_id` 递归扫描，再按会议日期过滤。不要再按月份目录分别拼扫描逻辑。

@@ -1,7 +1,7 @@
 ﻿---
 name: multi-team-meeting-summary
 description: "多团队会议记录汇总分析 Skill：根据日期生成综合会议记录汇总分析报告，并生成全量或增量会议记录看板。"
-version: 1.2.1
+version: 1.2.2
 metadata: {"openclaw":{"category":"productivity","emoji":"📊","keywords":["会议汇总","多团队","会议分析","综合报告","会议看板","kanban"]}}
 ---
 
@@ -90,3 +90,7 @@ npm run kanban:range -- 0610 0622
 ## 输出审核警告
 
 每次生成 AI 产物后，必须提示：AI 生成内容可能存在遗漏、误读、归因错误或表格统计偏差，关键事实、风险等级、时间节点和责任归属请以原始会议记录为准。
+
+## 链接交付
+
+报告或看板生成完成后，必须调用已安装的 `s3-file-manager` Skill 上传主报告和看板；再对每个 `download_url` 执行 `npm run kanban:shorten -- "<download_url>"`，把短链接作为用户链接返回。底层 S3 链接有效期为 7 天，交付链接必须短于 300 字符；同时保留本地输出路径。上传或短链失败时必须明确说明，不得只返回本地路径或声称已生成链接。
