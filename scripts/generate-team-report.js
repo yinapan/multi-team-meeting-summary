@@ -9,6 +9,7 @@ const {
   formatGenerationMode, printAiReviewWarning,
   docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, readInputJson, writeOutputJson, normalizeDate, formatDateChinese, dateInRange, meetingDateInRange,
   isMultiSourceTeam, groupByLabel,
+  filterAnalyzableMeetings, isImportantMeetingTitle, sortImportantMeetingsFirst,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, PageNumber, PageBreak
 } = require('./shared');
@@ -380,8 +381,15 @@ async function main() {
       }
       data = { team: teamName, documents };
     }
-    data.documents = data.documents.filter(d =>
-      d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '')
+    data.documents = sortImportantMeetingsFirst(
+      filterAnalyzableMeetings(data.documents)
+        .map(d => ({
+          ...d,
+          important: d.important || isImportantMeetingTitle(d.name || d.title)
+        }))
+        .filter(d =>
+          d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '')
+        )
     );
     if (data.documents.length === 0) {
       console.log(`跳过 ${teamName}：日期范围内无文档`);

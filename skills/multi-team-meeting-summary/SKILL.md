@@ -33,4 +33,6 @@ If it fails, stop after the first authentication or permission error. Ask the us
 - Date-range report: `npm run report -- <MM-DD> <MM-DD>`
 - Direct document read: use `wps365-cli drive file-content get <drive-id> <file-id> --format markdown` only after the authentication check.
 
+For reports, titles marked `【保密】`, `[保密]`, or with equivalent full-width square brackets must be excluded before reading and from all counts, summaries, important-meeting lists, and generated reports. Confidential status always overrides an important marker or important attendee.
+
 Treat WPS access as read-only unless the user explicitly asks to create or modify a document. After generation, report output paths, team count, meeting count, and any failed reads. Do not describe a cached or permission-incomplete result as a successful full scan.

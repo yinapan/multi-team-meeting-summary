@@ -2033,7 +2033,8 @@ function getMeetingTitle(item) {
 }
 
 function isConfidentialMeetingTitle(title) {
-  return String(title || '').includes('【保密】');
+  const normalized = String(title || '').normalize('NFKC');
+  return /(?:【\s*保密\s*】|\[\s*保密\s*\])/.test(normalized);
 }
 
 function isImportantMeetingTitle(title) {

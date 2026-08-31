@@ -18,6 +18,13 @@ const confidentialDoc = {
   todos: ['保密待办不得进入报告'],
   rawContent: '保密正文'
 };
+const asciiBracketConfidentialDoc = {
+  name: '[保密]20260824-绩效评审会.otl',
+  conclusions: ['保密绩效结论不得进入报告'],
+  todos: ['保密绩效待办不得进入报告'],
+  important: true,
+  rawContent: '参会人员包含重要人员，但标题已标注保密'
+};
 const normalDoc = {
   name: '20260513-项目周会.otl',
   conclusions: ['普通事项需要继续推进'],
@@ -32,6 +39,11 @@ const importantDoc = {
 };
 
 assert.strictEqual(isConfidentialMeetingTitle(confidentialDoc.name), true);
+assert.strictEqual(
+  isConfidentialMeetingTitle(asciiBracketConfidentialDoc.name),
+  true,
+  'ASCII square-bracket confidential titles should be excluded'
+);
 assert.strictEqual(isImportantMeetingTitle(importantDoc.name), true);
 assert.strictEqual(isImportantMeetingTitle('20260514-重要但无标记.otl'), false);
 
@@ -46,7 +58,7 @@ const reportExtracted = {
 };
 assert.strictEqual(reportExtracted.important, true, 'report flow should mark title-tagged meetings as important');
 
-const analyzable = filterAnalyzableMeetings([confidentialDoc, normalDoc, importantDoc]);
+const analyzable = filterAnalyzableMeetings([confidentialDoc, asciiBracketConfidentialDoc, normalDoc, importantDoc]);
 assert.deepStrictEqual(
   analyzable.map(doc => doc.name),
   [normalDoc.name, importantDoc.name],
@@ -62,19 +74,19 @@ assert.deepStrictEqual(
 
 const baseline = createMeetingBaseline([{
   team: 'Alpha',
-  meetingListItems: [confidentialDoc, normalDoc, importantDoc],
-  documents: [confidentialDoc, normalDoc, importantDoc]
+  meetingListItems: [confidentialDoc, asciiBracketConfidentialDoc, normalDoc, importantDoc],
+  documents: [confidentialDoc, asciiBracketConfidentialDoc, normalDoc, importantDoc]
 }], { applyMeetingTitleFilters: true });
 assert.strictEqual(baseline.counts.meetingListCount, 2);
 assert.strictEqual(baseline.counts.analyzedDocumentCount, 2);
 assert.deepStrictEqual(baseline.teams[0].documentNames, [normalDoc.name, importantDoc.name]);
 
-const analysis = analyzeDocs(filterAnalyzableMeetings([confidentialDoc, importantDoc]), 'Alpha');
+const analysis = analyzeDocs(filterAnalyzableMeetings([confidentialDoc, asciiBracketConfidentialDoc, importantDoc]), 'Alpha');
 assert.strictEqual(analysis.importantCount, 1);
 assert(!analysis.allConclusionItems.some(item => item.text.includes('保密')));
 
 const prompt = buildTeamReportPrompt(
-  { documents: sortImportantMeetingsFirst(filterAnalyzableMeetings([confidentialDoc, normalDoc, importantDoc])) },
+  { documents: sortImportantMeetingsFirst(filterAnalyzableMeetings([confidentialDoc, asciiBracketConfidentialDoc, normalDoc, importantDoc])) },
   analyzeDocs(filterAnalyzableMeetings([normalDoc, importantDoc]), 'Alpha'),
   'Alpha',
   { startDate: '05-12', endDate: '05-24' }

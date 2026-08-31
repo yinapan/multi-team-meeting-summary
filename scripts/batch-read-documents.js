@@ -62,7 +62,7 @@ async function main() {
     const confidentialFiles = applyReportAnalysisFilter ? scannedFiles.filter(f => isConfidentialMeetingTitle(f.name)) : [];
     const allFiles = applyReportAnalysisFilter ? filterAnalyzableMeetings(scannedFiles) : scannedFiles;
     if (applyReportAnalysisFilter && confidentialFiles.length > 0) {
-      console.log(`  已跳过 ${confidentialFiles.length} 篇标题含【保密】的会议记录，不读取正文且不纳入统计`);
+      console.log(`  已跳过 ${confidentialFiles.length} 篇标题含保密标记的会议记录，不读取正文且不纳入统计`);
     }
 
     const candidateCount = allFiles.length;
