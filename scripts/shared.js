@@ -1105,6 +1105,9 @@ function writeCheckpoint(startDate, endDate, completedTeams, lastTeam) {
 
 async function scanAllTeams(config, startDate, endDate, pacer, options = {}) {
   const { includeAll = true, resume = false } = options;
+  // Full/report scans must see newly-created folders. Keep child tree-cache
+  // reuse, but refresh each parent listing so new children enter the tree.
+  if (includeAll && pacer) pacer.forceRefresh = true;
   const scanMode = getKdocsScanMode();
   const allTeamsData = [];
 
@@ -1274,64 +1277,32 @@ async function pacedWps365Cli(pacer, args, timeout, kind = 'requests', beforeSpa
 }
 
 async function listFolderAsync(driveId, parentId, teamName, pacer, _folderPath = '') {
-  const cacheFile = path.join(teamFoldersCacheDir(teamName), `${driveId}_${parentId}.json`);
+  const cacheFile = path.join(teamFoldersCacheDir(teamName), driveId + '_' + parentId + '.json');
   const cached = readCache(cacheFile);
   const skipCache = pacer && pacer.forceRefresh;
-  if (!skipCache && cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) {
-    return cached.items;
-  }
-
-  const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500 });
+  if (!skipCache && cached && (Date.now() - cached.fetched_at) < FOLDER_CACHE_TTL) return cached.items;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const result = isWps365Provider()
-      ? await pacedWps365Cli(pacer, buildWps365ListArgs({ driveId, parentId, pageSize: 500 }), 15000, 'list')
-      : await pacedKdocsCli(
-        pacer,
-        ['drive', 'list-files', '--output', 'json'],
-        inputJson,
-        15000,
-        'list'
-      );
-    const { error, stdout } = result;
-    if (error && !stdout) {
-      if (attempt < MAX_RETRIES) {
-        if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
-        const delay = retryDelay(attempt);
-        process.stderr.write(`[listFolderAsync] error folder=${parentId}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
-        await sleep(delay);
-        continue;
-      }
-      process.stderr.write(`[listFolderAsync] failed folder=${parentId}: ${error.substring(0, 100)}\n`);
-      if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-      if (cached) return cached.items;
-      return [];
-    }
     try {
-      const parsed = JSON.parse(stdout);
-      const apiError = isWps365Provider()
-        ? getWps365ApiError(parsed)
-        : (parsed && parsed.code && parsed.code !== 0 ? { code: parsed.code } : null);
-      if (apiError) {
-        const errorCode = apiError.code;
-        if (RETRY_CODES.has(errorCode) && attempt < MAX_RETRIES) {
-          if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(errorCode));
-          if (pacer && typeof pacer.noteRetry === 'function') pacer.noteRetry();
-          const delay = retryDelay(attempt);
-          process.stderr.write(`[listFolderAsync] rate limited folder=${parentId} code=${errorCode}, retry in ${(delay / 1000).toFixed(0)}s (${attempt + 1}/${MAX_RETRIES})...\n`);
-          await sleep(delay);
-          continue;
+      let token = null;
+      const items = [];
+      do {
+        const inputJson = JSON.stringify({ drive_id: driveId, parent_id: parentId, page_size: 500, ...(token ? { page_token: token } : {}) });
+        const result = isWps365Provider()
+          ? await pacedWps365Cli(pacer, buildWps365ListArgs({ driveId, parentId, pageSize: 500, pageToken: token }), 15000, 'list')
+          : await pacedKdocsCli(pacer, ['drive', 'list-files', '--output', 'json'], inputJson, 15000, 'list');
+        if (result.error && !result.stdout) throw new Error(result.error);
+        const parsed = JSON.parse(result.stdout);
+        const apiError = isWps365Provider() ? getWps365ApiError(parsed) : (parsed && parsed.code && parsed.code !== 0 ? { code: parsed.code } : null);
+        if (apiError) {
+          if (RETRY_CODES.has(apiError.code)) {
+            if (pacer && typeof pacer.noteRateLimit === 'function') pacer.noteRateLimit(undefined, classifyRateLimitCode(apiError.code));
+          }
+          throw new Error('API error ' + apiError.code);
         }
-        process.stderr.write(`[listFolderAsync] API error folder=${parentId} code=${errorCode}\n`);
-        if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-        if (cached) {
-          if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-          return cached.items;
-        }
-        return [];
-      }
-      const items = isWps365Provider()
-        ? getWps365FileList(parsed).items
-        : (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [];
+        const page = isWps365Provider() ? getWps365FileList(parsed) : { items: (parsed && parsed.data && parsed.data.data && parsed.data.data.items) || [], nextPageToken: parsed && parsed.data && parsed.data.data && (parsed.data.data.next_page_token || parsed.data.data.page_token) };
+        items.push(...page.items);
+        token = page.nextPageToken || null;
+      } while (token);
       if (pacer && typeof pacer.noteSuccess === 'function') pacer.noteSuccess();
       writeCache(cacheFile, { items, fetched_at: Date.now() });
       if (_folderPath) writeTreeFolderListing(teamName, _folderPath, items);
@@ -1343,17 +1314,14 @@ async function listFolderAsync(driveId, parentId, teamName, pacer, _folderPath =
         await sleep(delay);
         continue;
       }
+      process.stderr.write('[listFolderAsync] failed folder=' + parentId + ', using cache\n');
       if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
       if (cached) return cached.items;
       return [];
     }
   }
-
-  if (pacer && typeof pacer.noteStaleCacheFallback === 'function') pacer.noteStaleCacheFallback();
-  if (cached) return cached.items;
-  return [];
+  return cached ? cached.items : [];
 }
-
 async function scanFolderAsync(driveId, folderId, startDate, endDate, teamName, pacer, _folderPath = '') {
   const items = await listFolderAsync(driveId, folderId, teamName, pacer, _folderPath);
   return scanFolderCoreAsync(driveId, folderId, startDate, endDate, teamName, pacer, _folderPath, items);
