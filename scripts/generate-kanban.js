@@ -1242,8 +1242,9 @@ function enrichKanbanFromDocCache(kanbanData, cacheData) {
 
 function pruneMeetingsWithoutConcreteDate(kanbanData) {
   const today = new Date();
-  const limitDate = new Date(today);
-  limitDate.setDate(today.getDate() + 30);
+  // A meeting title dated after today is usually a stale/misparsed date prefix;
+  // keep the board anchored to records that have already occurred.
+  const limitDate = today;
   const limitNum = (limitDate.getMonth() + 1) * 100 + limitDate.getDate();
   for (const team of kanbanData?.teams || []) {
     for (const [weekKey, meetings] of Object.entries(team.weeks || {})) {
@@ -1799,16 +1800,16 @@ async function main() {
   if (dateRange) {
     if (!offline) {
       if (!config) {
-        console.error(`閰嶇疆鏂囦欢涓嶅瓨鍦? ${configFile}`);
+        console.error(`配置文件不存在: ${configFile}`);
         process.exit(1);
       }
-      console.log(`鐢熸垚鏃堕棿娈电湅鏉? ${dateRange.startDate} 至 ${dateRange.endDate}锛屽鐢ㄧ患鍚堟姤鍛奱atch-read 閫昏緫...`);
+      console.log(`生成时间段看板: ${dateRange.startDate} 至 ${dateRange.endDate}，复用综合报告 batch-read 逻辑...`);
       runBatchReadForDateRange(dateRange);
     }
 
     const summariesFile = findInputFile('all-team-summaries.json');
     if (!fs.existsSync(summariesFile)) {
-      console.error(`鏃堕棿娈电湅鏉块渶瑕佺患鍚堟姤鍛婁骇鐗? ${summariesFile}`);
+      console.error(`时间段看板需要综合报告产物: ${summariesFile}`);
       process.exit(1);
     }
     const teamSummaries = JSON.parse(fs.readFileSync(summariesFile, 'utf-8'));
@@ -1840,10 +1841,10 @@ async function main() {
       },
       batchRead: batchStats
     });
-    console.log(`鏃堕棿娈电湅鏉挎暟鎹凡淇濆瓨: ${writtenDataFile}`);
-    console.log(`鏃堕棿娈电湅鏉垮凡鐢熸垚: ${(Buffer.byteLength(html) / 1024).toFixed(1)}KB -> ${htmlFilePath}`);
-    console.log(`  鍥㈤槦鏁? ${kanbanData.teams.length}, 浼氳鏁? ${totalMeetings}`);
-    console.log(`鐢熸垚缁熻: ${statsFile}`);
+    console.log(`时间段看板数据已保存: ${writtenDataFile}`);
+    console.log(`时间段看板已生成: ${(Buffer.byteLength(html) / 1024).toFixed(1)}KB -> ${htmlFilePath}`);
+    console.log(`  团队数: ${kanbanData.teams.length}, 会议数: ${totalMeetings}`);
+    console.log(`生成统计: ${statsFile}`);
     return;
   }
 

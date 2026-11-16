@@ -45,8 +45,8 @@ assert.deepStrictEqual(
 );
 
 assert.strictEqual(
-  kanbanOutputName('浼氳鐪嬫澘.html', { startLabel: '0610', endLabel: '0622' }),
-  '浼氳鐪嬫澘-0610-0622.html',
+  kanbanOutputName('会议看板.html', { startLabel: '0610', endLabel: '0622' }),
+  '会议看板-0610-0622.html',
   'date-range kanban output should not overwrite the full kanban'
 );
 

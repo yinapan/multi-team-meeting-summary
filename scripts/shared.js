@@ -205,6 +205,9 @@ class RequestPacer {
 
   noteRateLimit(cooldownMs, type) {
     this.stats.rateLimits++;
+    // Rate limiting means a subsequent scan should prefer known-good cache
+    // data while the request bucket recovers.
+    this.noteCacheRebuild('rate-limit');
     this.successSinceRateLimit = 0;
     if (type === 'quota') {
       this.currentIntervalMs = this.adaptiveMaxIntervalMs;
