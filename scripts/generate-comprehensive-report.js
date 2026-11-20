@@ -38,21 +38,17 @@ function teamDocCount(td) {
   return ((td && td.data && td.data.documents) || []).length;
 }
 
-// Preserve the agent's lists and compute the statistics from the same dated
-// records and list items that are actually rendered in chapter four.
-function formatAgentTeamSections(markdown, teamDataList, multiSourceSet, pending) {
-  const chapter = /^(#{1,2}[ \t]+四[、.．][^\n]*\n)([\s\S]*?)(?=^#{1,2}[ \t]+五[、.．])/m.exec(markdown);
-  if (!chapter) throw pending('请补全第四章“各团队会议汇总”。');
+function sections(text, level) {
+  const heading = new RegExp('^#{' + level + '}[ \\t]+([^\\n]+)$', 'gm');
+  const matches = [...text.matchAll(heading)];
+  return matches.map((match, i) => ({
+    title: match[1].trim(),
+    body: text.slice(match.index + match[0].length, matches[i + 1]?.index).trim()
+  }));
+}
 
-  function sections(text, level) {
-    const heading = new RegExp(`^#{${level}}[ \\t]+([^\\n]+)$`, 'gm');
-    const matches = [...text.matchAll(heading)];
-    return matches.map((match, i) => ({
-      title: match[1].trim(),
-      body: text.slice(match.index + match[0].length, matches[i + 1]?.index).trim()
-    }));
-  }
-
+// Compute the statistics from the same records and list items shown in the report.
+function formatTeamSections(body, teamDataList, multiSourceSet, pending) {
   function requireHeadings(blocks, names, scope) {
     const found = new Set(blocks.map(block => block.title));
     if (blocks.length !== names.length || names.some(name => !found.has(name))) {
@@ -76,7 +72,7 @@ function formatAgentTeamSections(markdown, teamDataList, multiSourceSet, pending
     });
   }
 
-  const teams = sections(chapter[2], 2);
+  const teams = sections(body, 2);
   const entries = new Map(teamDataList.map(td => [td.teamName, td]));
   requireHeadings(teams, [...entries.keys()], '第四章');
   const formatted = teams.map(({ title: team, body }) => {
@@ -100,7 +96,158 @@ function formatAgentTeamSections(markdown, teamDataList, multiSourceSet, pending
     const statsText = `本期共 ${data.documents.length} 场会议，其中 ${analysis.importantCount} 场为重要会议。下文汇总 ${counts[0]} 项核心议题、${counts[1]} 项关键决议。`;
     return [`## ${team}`, '### 会议统计', statsText, ...details.map(block => `### ${block.title}\n\n${block.body}`)].join('\n\n');
   });
-  return markdown.slice(0, chapter.index) + chapter[1] + '\n' + formatted.join('\n\n') + '\n\n' + markdown.slice(chapter.index + chapter[0].length);
+  return formatted.join('\n\n');
+}
+
+const CHAPTER_TITLES = ['二、风险点分析', '三、重点关注节点', '四、各团队会议汇总', '五、综合评估与建议'];
+const GRADE_LABELS = ['推进较好', '推进一般', '待加强'];
+const NODE_STATUSES = ['冲刺中', '筹备中', '开发中', '制作中', '推进中', '已过审', '已执行', '加急中'];
+
+function bodyLines(text) {
+  return text.split('\n').map(line => line.trim()).filter(Boolean);
+}
+
+function evidenceNote(line) {
+  return !!line && !line.includes('\n') && /^(?:本期|本月内|未来两个月|本月|本章|本节|该主题|本主题)?(?:会议纪要|会议记录|会议|纪要|资料|数据|证据|材料|记录|依据)?(?:中|内)?(?:尚|均|仍)?(?:不足|有限|暂无|无法(?:判断|评估|分级|归纳|分析)|未(?:记录|发现|确认|明确|列出|形成|提及|识别)|(?:没有|无)(?:明确|足够|可列入|可供|已分级)|无[。.]?$)/.test(line);
+}
+
+function listItems(text, scope, fail) {
+  if (evidenceNote(text.trim())) return [];
+  const lines = bodyLines(text);
+  const items = lines.map(line => /^(?:[•*-]|\d+[.、])\s+(\S.*)$/.exec(line)?.[1]);
+  if (!items.length || items.some(item => !item)) throw fail(scope + '应逐条使用项目符号；资料不足请单独说明。');
+  return items;
+}
+
+function tableRows(block, headers, fail) {
+  const lines = block.body.trim().split('\n').map(line => line.trim());
+  const cells = lines.map(line => /^\|.*\|$/.test(line) ? line.slice(1, -1).split('|').map(value => value.trim()) : []);
+  if (lines.length < 3 || cells.some(row => row.length !== headers.length || row.some(value => !value)) ||
+      headers.some((header, i) => header !== cells[0][i]) || cells[1].some(value => !/^:?-{3,}:?$/.test(value))) {
+    throw fail(block.title + '需要有表头、分隔线和数据行的表格，列为“' + headers.join('、') + '”。');
+  }
+  return cells.slice(2);
+}
+
+function isParagraph(text) {
+  return !!text && bodyLines(text).every(line => !/^(?:[#|•*-]|\d+[.、]\s)/.test(line));
+}
+
+function numberedSections(chapter, titles, fail) {
+  if (!isParagraph(chapter.body.split(/^##\s/m, 1)[0].trim())) throw fail(chapter.title + '应先写概述段落。');
+  const blocks = sections(chapter.body, 2);
+  if (blocks.length !== titles.length || titles.some((title, i) => blocks[i].title !== title)) {
+    throw fail(chapter.title + '应依次包含“' + titles.join('”“') + '”。');
+  }
+  return blocks;
+}
+
+function validateRisks(chapter, teamDataList, sourceNames, fail) {
+  const [high, mid, matrix] = numberedSections(chapter, ['2.1 高风险事项', '2.2 中风险事项', '2.3 风险矩阵'], fail);
+  const risks = new Map();
+  for (const [block, level] of [[high, '高'], [mid, '中']]) {
+    const items = listItems(block.body, block.title, fail);
+    if (items.some(item => !item.startsWith('【' + level + '】') || !item.slice(3).trim() || /\*\*/.test(item))) {
+      throw fail(block.title + '的每个条目应以【' + level + '】开头，随后直接写风险。');
+    }
+    risks.set(level, items);
+  }
+  if (!risks.get('高').length && !risks.get('中').length && evidenceNote(matrix.body)) return;
+  const documents = teamDataList.flatMap(td => td.data.documents.map(doc =>
+    [td.teamName, doc.sourceLabel, doc.name, ...(doc.conclusions || []), ...(doc.todos || []), doc.rawContent].join('\n').replace(/\s+/g, '')
+  ));
+  for (const [name, level, scope] of tableRows(matrix, ['风险项', '等级', '影响范围'], fail)) {
+    const normalized = name.replace(/\s/g, '');
+    if (!risks.get(level)?.some(item => item.replace(/\s/g, '').includes(normalized))) {
+      throw fail('2.3 风险矩阵中的“' + name + '”应使用2.1或2.2同等级条目中的风险简名。');
+    }
+    for (const department of scope.split(/[、,，]/).map(value => value.trim())) {
+      if (!department || /^(?:[-—/]|无|未知|未明确|待定|待确认)$/.test(department) ||
+          (!sourceNames.has(department) && !documents.some(text => text.includes(department.replace(/\s+/g, ''))))) {
+        throw fail('2.3 风险矩阵的影响范围应使用本期部门或会议材料中的项目名称：' + scope);
+      }
+    }
+  }
+}
+
+function validateMilestones(chapter, teamNames, sourceNames, fail) {
+  const blocks = numberedSections(chapter, ['3.1 近期节点（本月内）', '3.2 中期节点（未来两个月）', '3.3 持续跟进事项'], fail);
+  for (const block of blocks.slice(0, 2)) {
+    if (evidenceNote(block.body)) continue;
+    for (const [, , owner, status] of tableRows(block, ['节点', '时间', '负责人/部门', '状态'], fail)) {
+      const owners = owner.split(/[、,，]/).map(name => name.trim());
+      if (owners.some(name => !teamNames.has(name) && !sourceNames.has(name))) throw fail(block.title + '的负责人/部门必须是本期团队或团队-来源：' + owner);
+      if (!NODE_STATUSES.includes(status)) throw fail(block.title + '的状态“' + status + '”不在可选范围：' + NODE_STATUSES.join('、'));
+    }
+  }
+  for (const item of listItems(blocks[2].body, blocks[2].title, fail)) {
+    const match = /^【([^】]+)】\s*\S/.exec(item);
+    if (!match || !sourceNames.has(match[1])) throw fail('3.3 持续跟进事项应以实际【团队】或多来源【团队-来源】开头。');
+  }
+}
+
+function validateAssessments(chapter, teamNames, sourceNames, fail) {
+  const blocks = sections(chapter.body, 2);
+  const note = chapter.body.split(/^##\s/m, 1)[0].trim();
+  if (note && !evidenceNote(note)) throw fail('第五章应按5.1起的战略主题撰写。');
+  if (blocks.length > 5 || (blocks.length < 4 && !evidenceNote(note))) throw fail('第五章应包含4至5个战略主题；材料不足时说明原因。');
+  const titles = new Set();
+  blocks.forEach((block, i) => {
+    const title = /^5\.(\d+)\s+(.+)$/.exec(block.title);
+    if (!title || Number(title[1]) !== i + 1 || titles.has(title[2]) || teamNames.has(title[2]) || sourceNames.has(title[2])) {
+      throw fail('第五章主题应按5.1起连续编号，各使用一个独立的战略主题标题：' + block.title);
+    }
+    titles.add(title[2]);
+    if (evidenceNote(block.body)) return;
+    const lines = bodyLines(block.body);
+    if (!isParagraph(lines[0])) throw fail(block.title + '须先写事实概述，再逐项评估进展。');
+    if (lines.length === 2 && evidenceNote(lines[1])) return;
+    let lastGrade = -1;
+    for (const [index, line] of lines.slice(1).entries()) {
+      if (index === lines.length - 2 && lastGrade >= 0 && /^(?:\*\*建议[：:]?\*\*[：:]?|建议[：:])\s*\S/.test(line)) continue;
+      const grade = /^[•*-]\s+\*\*(推进较好|推进一般|待加强)(?:\*\*[：:]|[：:]\*\*)\s*(.+)$/.exec(line);
+      if (!grade || GRADE_LABELS.indexOf(grade[1]) <= lastGrade) throw fail(block.title + '应按序分列有依据的“推进较好、推进一般、待加强”，使用加粗标签和项目符号。');
+      const evidence = grade[2].trim();
+      const owner = [...sourceNames].find(name => evidence.includes(name));
+      if (!owner || !/[\p{L}\p{N}]/u.test(evidence.replace(owner, ''))) throw fail(block.title + '“' + grade[1] + '”须写明本期团队或团队-来源及其事实依据。');
+      lastGrade = GRADE_LABELS.indexOf(grade[1]);
+    }
+    if (lastGrade < 0) throw fail(block.title + '缺少有事实支持的推进分级；证据不足须明确说明。');
+  });
+}
+
+function formatComprehensiveAnalysis(markdown, teamDataList, multiSourceSet, fail, allowMissingTail = false) {
+  const normalized = markdown.trim().replace(/\r\n/g, '\n');
+  const chapters = sections(normalized, 1);
+  const count = chapters.length;
+  if ((allowMissingTail ? count < 2 || count > 4 : count !== 4) ||
+      chapters.some((chapter, i) => chapter.title !== CHAPTER_TITLES[i])) {
+    throw fail('综合报告应从“1.2 主要趋势”起，按顺序使用第二至第五章的原定标题。');
+  }
+  if (chapters[2]) chapters[2].body = formatTeamSections(chapters[2].body, teamDataList, multiSourceSet, fail);
+  const intro = normalized.split(/^#\s/m, 1)[0].trim();
+  const trends = sections(intro, 2);
+  if (trends.length !== 1 || trends[0].title !== '1.2 主要趋势' || !intro.startsWith('## ')) throw fail('第一章分析必须从“## 1.2 主要趋势”开始。');
+  const lines = bodyLines(trends[0].body);
+  const notes = lines.filter(evidenceNote);
+  const trendItems = listItems(lines.filter(line => !evidenceNote(line)).join('\n') || notes[0] || '', '1.2 主要趋势', fail);
+  if (trendItems.length > 6 || (trendItems.length < 5 && !notes.length)) throw fail('1.2 主要趋势应分列5–6项，材料不足时说明原因。');
+  const teamNames = new Set(teamDataList.map(td => td.teamName));
+  const sourceNames = new Set();
+  for (const { teamName, data } of teamDataList) {
+    if (!multiSourceSet.has(teamName)) sourceNames.add(teamName);
+    else for (const label of groupByLabel(data.documents, teamName).keys()) sourceNames.add(teamName + '-' + label);
+  }
+  for (const match of normalized.matchAll(/【([^】\n]+)】/g)) {
+    const label = match[1];
+    if ([...multiSourceSet].some(team => label === team || label.startsWith(team + '-')) && !sourceNames.has(label)) {
+      throw fail('多来源标记【' + label + '】应使用本期实际的【团队-来源】。');
+    }
+  }
+  validateRisks(chapters[0], teamDataList, sourceNames, fail);
+  validateMilestones(chapters[1], teamNames, sourceNames, fail);
+  if (chapters[3]) validateAssessments(chapters[3], teamNames, sourceNames, fail);
+  return [intro, ...chapters.map(chapter => '# ' + chapter.title + '\n\n' + chapter.body)].join('\n\n') + '\n';
 }
 
 function sortTeamsByDocumentCount(teamDataList) {
@@ -570,16 +717,16 @@ async function main() {
   let llmResult = await callLLM(prompt, config, {
     startDate, endDate,
     onModel: name => { analysisModel = name; },
-    formatAnswer: (answer, pending) => formatAgentTeamSections(answer, teamDataList, multiSourceSet, pending)
+    formatAnswer: (answer, pending) => formatComprehensiveAnalysis(answer, teamDataList, multiSourceSet, pending)
   });
   if (llmResult) {
+    if (mode !== 'agent') {
+      llmResult = formatComprehensiveAnalysis(llmResult, teamDataList, multiSourceSet, reason => new Error('综合报告格式不完整：' + reason), true);
+      llmTruncated = !/^# 五、综合评估与建议$/m.test(llmResult);
+      if (llmTruncated) console.log('⚠️ LLM 输出缺少末尾章节，将用规则分析补充缺失章节');
+    }
     llmResult = normalizeMultiSourceBulletPrefixes(llmResult, multiSourceNames);
     console.log(`LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB，解析中...`);
-    const hasSection5 = /^#\s+五|^##\s*5[.、]/m.test(llmResult) || /综合评估|建议/.test(llmResult.substring(llmResult.length - 2000));
-    if (mode !== 'agent' && !hasSection5) {
-      console.log('⚠️ LLM 输出可能被截断（缺少第五部分），将用规则分析补充缺失章节');
-      llmTruncated = true;
-    }
     analyticalElements = parseReportMarkdown(llmResult);
     if (analyticalElements && analyticalElements.length > 0) {
       generationMode = mode === 'agent' ? 'agent' : (llmTruncated ? 'llm-with-rules-supplement' : 'llm');
@@ -594,14 +741,13 @@ async function main() {
     generationMode = 'rules-fallback';
     analyticalElements = buildFallbackContent(teamDataList, allHighRisks, allMidRisks, { grandTotalDocs: reportCounts.analyzedDocumentCount, startDate, endDate, multiSourceSet, reportLimits });
   } else if (llmTruncated) {
-    const hasFourInLlm = llmResult && /^#\s+四|各.*团队.*会议汇总/m.test(llmResult);
-    const hasFiveInLlm = llmResult && /^#\s+五|综合评估与建议/m.test(llmResult);
+    const hasFourInLlm = /^# 四、各团队会议汇总$/m.test(llmResult);
     if (!hasFourInLlm) {
       console.log('补充第四、五部分（规则回退）...');
       ruleFallbackSections.push('section4', 'section5');
       analyticalElements.push(...buildFallbackSection4(teamDataList, reportLimits));
       analyticalElements.push(...buildFallbackSection5(teamDataList, reportCounts.analyzedDocumentCount));
-    } else if (!hasFiveInLlm) {
+    } else {
       console.log('补充第五部分（综合评估与建议，规则回退）...');
       ruleFallbackSections.push('section5');
       analyticalElements.push(...buildFallbackSection5(teamDataList, reportCounts.analyzedDocumentCount));
@@ -671,14 +817,13 @@ async function main() {
               cCell(`${td.data.documents.length}份`, 2226)
             ]}))
           ]}),
-          new Paragraph({ spacing: { before: 300 }, children: [] }),
           h3("纳入率统计"),
-          new Table({ columnWidths: [3000, 3013, 3013], rows: [
-            new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 3013), hCell("说明", 3013)] }),
-            new TableRow({ children: [cCell("会议清单数", 3000), cCell(`${reportCounts.meetingListCount}条`, 3013, { bold: true }), cCell("统一数据基线中的会议条目", 3013)] }),
-            new TableRow({ children: [cCell("成功读取数", 3000), cCell(`${reportCounts.successfulReadCount}份`, 3013, { bold: true }), cCell("成功读取正文或提取结构化内容的文档", 3013)] }),
-            new TableRow({ children: [cCell("纳入分析数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 3013, { bold: true }), cCell("进入正文分析与附录统计的文档", 3013)] }),
-            new TableRow({ children: [cCell("文档纳入率", 3000), cCell(`${inclusionRate}%`, 3013, { bold: true }), cCell(`${reportCounts.analyzedDocumentCount}/${reportCounts.meetingListCount}`, 3013)] })
+          new Table({ columnWidths: [2313, 1500, 5213], rows: [
+            new TableRow({ tableHeader: true, children: [hCell("统计项", 2313), hCell("数值", 1500), hCell("说明", 5213)] }),
+            new TableRow({ children: [cCell("会议清单数", 2313), cCell(`${reportCounts.meetingListCount}条`, 1500, { bold: true }), cCell("统一数据基线中的会议条目", 5213)] }),
+            new TableRow({ children: [cCell("成功读取数", 2313), cCell(`${reportCounts.successfulReadCount}份`, 1500, { bold: true }), cCell("成功读取正文或提取结构化内容的文档", 5213)] }),
+            new TableRow({ children: [cCell("纳入分析数", 2313), cCell(`${reportCounts.analyzedDocumentCount}份`, 1500, { bold: true }), cCell("进入正文分析与附录统计的文档", 5213)] }),
+            new TableRow({ children: [cCell("文档纳入率", 2313), cCell(`${inclusionRate}%`, 1500, { bold: true }), cCell(`${reportCounts.analyzedDocumentCount}/${reportCounts.meetingListCount}`, 5213)] })
           ]}),
           ...buildInclusionNote(reportCounts, baseline),
           new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "— 报告完 —", color: C.gray, size: 20, font: FONT })] })

@@ -85,7 +85,8 @@ function formatGenerationMode(mode, models = []) {
     if (names.length === 0) names.push('模型未记录');
     else if (missing) names.push('部分模型未记录');
     const label = mode === 'agent' ? '当前会话 agent' : 'LLM';
-    return `${label}（${names.join('、')}）`;
+    const formatted = `${label}（${names.join('、')}）`;
+    return mode === 'llm-with-rules-supplement' ? formatted + '，缺失章节由规则补充' : formatted;
   }
   if (mode === 'rules-fallback') return '规则回退';
   if (mode === 'skipped') return '跳过';
@@ -468,8 +469,8 @@ function bullet(t, o = {}) {
 }
 
 function h1(t) { return new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: t, bold: true })] }); }
-function h2(t) { return new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun({ text: t, bold: true })] }); }
-function h3(t) { return new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun({ text: t, bold: true, color: '2E74B5' })] }); }
+function h2(t) { return new Paragraph({ heading: HeadingLevel.HEADING_2, keepNext: true, children: [new TextRun({ text: t, bold: true })] }); }
+function h3(t) { return new Paragraph({ heading: HeadingLevel.HEADING_3, keepNext: true, children: [new TextRun({ text: t, bold: true, color: '2E74B5' })] }); }
 function p(t, o = {}) { return new Paragraph({ keepNext: o.keepNext, spacing: { before: o.before || 160, after: o.after || 120, line: 276 }, alignment: AlignmentType.JUSTIFIED, children: [new TextRun({ text: t, bold: o.bold || false, font: FONT, size: 20, color: o.color || C.text })] }); }
 function pb() { return new Paragraph({ children: [new PageBreak()] }); }
 
@@ -3278,7 +3279,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('5. 每条分析必须能指出来源于哪场会议的哪条结论或待办。如果某个章节数据不足以支撑分析，直接写"数据不足，暂无法分析"，绝不凑内容。');
   parts.push('6. 识别源数据中的推测性表述：结论或待办中带有"计划""预计""初步""考虑""拟""可能""争取""探索""尝试""有望""或将"等修饰词的陈述，在写入报告时必须保留其不确定性语气，不得改写为确定性陈述。');
   parts.push('7. 风险分析只能基于数据中明确提到的问题原文，不允许自行推断潜在风险。');
-  parts.push('8. 报告面向对外阅读，正文段落和普通 bullet 不要在句尾输出"（来源：...）"；来源只保留在表格的"来源会议"列以及附录中。');
+  parts.push('8. 报告面向对外阅读，正文段落和普通 bullet 不附会议文件名尾注。风险矩阵及节点表按下文规定的列数输出，依据可回查本期会议资料。');
   parts.push('');
   parts.push(`基于以下 ${teamCount || teamDataList.length} 个团队共 ${grandTotalDocs || '若干'} 份会议记录的汇总数据（${startDate} ~ ${endDate}），`);
   parts.push('请为综合分析报告生成全部分析内容。');
@@ -3342,6 +3343,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('');
   parts.push(`第四章的"核心议题"和"关键决议"每个团队输出 ${promptMinItems}-${promptMaxItems} 条；数据足够时优先接近上限，不要固定只写3条。`);
   parts.push('请按以下结构输出纯 markdown（不要代码块包裹），从"## 1.2 主要趋势"开始：');
+  parts.push('保留所有章节的标题、层级及顺序。证据不足时用独立的一句说明缺少哪类依据；资料仅支持较少趋势或战略主题时列出能支持的内容并说明，其余不凑数。');
   parts.push('');
   parts.push('## 1.2 主要趋势');
   parts.push('按公司层级信息贯通进行总结，列出5-6条跨团队、跨项目的主要趋势；不要照抄用户参考条目，不要按单个团队流水账罗列。每条用自然段式bullet输出，先写公司层面的趋势判断，再串联支撑该趋势的部门/项目事实。');
@@ -3359,6 +3361,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('仅从上面标记为[中]的条目中提取，保留5-8条代表性事项，合并同类项。每条格式：• 【中】风险描述。禁止在【中】后面加 **加粗小标题**，直接写风险描述。');
   parts.push('## 2.3 风险矩阵');
   parts.push('输出markdown表格，只保留3列：风险项、等级、影响范围。去掉量化影响和来源会议两列；影响范围必须填写所属部门或项目名称，不要写泛化影响描述。仅包含2.1和2.2中已列出的风险，不得新增。');
+  parts.push('矩阵风险项用同等级风险条目中的简名，以便核对。两级均没有已识别风险时在2.3写明无可列入矩阵的事项。');
   parts.push('| 风险项 | 等级 | 影响范围 |');
   parts.push('|--------|------|----------|');
   parts.push('| 剑侠世界4外网性能不达标 | 高 | 剑侠世界系列 |');
@@ -3368,7 +3371,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('## 3.1 近期节点（本月内）');
   parts.push('仅从上面"时间节点"章节中提取，不得编造不存在的时间节点。');
   parts.push('输出markdown表格，4列：节点、时间、负责人/部门、状态。');
-  parts.push('⚠️ 负责人/部门必须是数据中的团队名称（即上面各"# 团队名"标题），不得填写会议内容中提到的内部小组或个人名（如"引擎组""测试团队"等）。');
+  parts.push('负责人/部门填写本期实际团队；属于特定来源时可写团队名-label。多个责任方用顿号分隔。');
   parts.push('⚠️ 状态从以下选择：冲刺中、筹备中、开发中、制作中、推进中、已过审、已执行、加急中。');
   parts.push('例如：');
   parts.push('| 节点 | 时间 | 负责人/部门 | 状态 |');
@@ -3411,11 +3414,9 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('');
   parts.push('');
   parts.push('⚠️ 来源标注规则（所有章节统一执行）：');
-  parts.push('- 正文段落与普通 bullet 不写来源尾注；只在风险矩阵和附录的"来源会议"列中保留来源。');
-  parts.push('- 单source团队表格来源格式：团队名-会议记录文件名，例如：SEED-20260507-项目周会-会议记录');
+  parts.push('- 正文按会议的所属团队和项目归属表述。风险矩阵列出影响范围，节点表列出负责人/部门，两表均不增设来源会议列。');
   parts.push('- 归属以会议数据中的来源团队为准；支援部门会议即使正文提到某项目，也不得把该事实改挂到项目所属团队或其他团队。');
   if (msNames.length > 0) {
-    parts.push(`- 多source团队（${msNames.join('、')}）表格来源格式：团队名-label-会议记录文件名，例如：经典剑侠系列-大部门-20260512-经典剑侠项目周例会`);
     parts.push('- label 必须严格来自 config.json 的 sources[].label；禁止使用会议标题中的【剧情】、【专项】等文本替代 label。');
   }
   parts.push('');
@@ -3434,6 +3435,7 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('• **推进一般**：团队名（同上，必须有数据支撑）');
   parts.push('• **待加强**：团队名（同上，必须有数据支撑）');
   parts.push('（某个分级如果数据中找不到支撑依据则省略该分级，不要强凑）');
+  parts.push('各主题连续编号；概述后按上述顺序逐项列出有依据的分级，每项明确团队及其进展或问题。可追加一条“建议：”说明有会议依据的下一步。');
   parts.push('');
   parts.push('【再次强调 — 反幻觉检查清单（输出前逐条自检）】');
   parts.push('1. 报告中每一条事实陈述，是否都能在上面的数据中找到对应原文？找不到则删除。');
@@ -3622,7 +3624,7 @@ function parseReportMarkdown(markdown) {
     if (!trimmed) continue;
 
     if (trimmed.startsWith('|')) {
-      if (lastType && lastType !== 'table') {
+      if (lastType && !['table', 'h2', 'h3', 'bold-p'].includes(lastType)) {
         elements.push(new Paragraph({ spacing: { before: 120, after: 0 }, children: [] }));
       }
       const { table, nextIdx } = parseMarkdownTable(lines, i);
@@ -3653,7 +3655,7 @@ function parseReportMarkdown(markdown) {
     } else if (/^[•\-\*]\s+\*\*/.test(trimmed)) {
       const m = trimmed.match(/^[•\-\*]\s+\*\*([^*]+)\*\*[：:\s]*(.*)/);
       if (m) {
-        elements.push(bullet(stripInlineSourceRefs(m[2] || ''), { bold: stripInlineSourceRefs(m[1]) + '：' }));
+        elements.push(bullet(stripInlineSourceRefs(m[2] || ''), { bold: stripInlineSourceRefs(m[1]).replace(/[：:]$/, '') + '：' }));
       } else {
         elements.push(bullet(stripInlineSourceRefs(trimmed.replace(/^[•\-\*]\s+/, ''))));
       }

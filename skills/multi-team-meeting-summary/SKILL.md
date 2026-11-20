@@ -41,7 +41,14 @@ When writing an answer, get the actual model ID from the authoring session or in
 
 To regenerate a report from a completed scan for the same period, start with `--resume-agent`; this reuses the validated dated inputs. Start with the normal report command when a fresh WPS scan is requested. Standalone script callers can select the project's `llm.mode` explicitly as `api` or `rules` in `config.json`.
 
-In chapter four of the comprehensive report, give each team with records its own section. Start with **会议统计**, giving the meeting count, important meeting count, and the numbers of topics and decisions listed below. Follow it with **核心议题** and **关键决议**, using one bullet per item. For a team with multiple sources, group both lists under each source represented that period, such as 理论研究院 under SEED. If the minutes contain no explicit decision, say so under 关键决议.
+Use the six chapters of the comprehensive report in order.
+
+1. **执行摘要** includes the generation note, review notice, key figures and a bulleted synthesis of company-wide trends.
+2. **风险点分析** opens with an overview. List high and medium risks separately. Use the three columns 风险项, 等级 and 影响范围. Matrix rows must refer to risks already listed at that grade.
+3. **重点关注节点** opens with an overview. For both 近期节点（本月内） and 中期节点（未来两个月）, use the columns 节点, 时间, 负责人/部门 and 状态. Preserve tentative schedules. List undated follow-ups separately under 3.3 with their team or source.
+4. **各团队会议汇总** gives each team with records its own section. Begin with 会议统计 (meetings, important meetings, topics and decisions actually listed). Follow with 核心议题 and 关键决议 as separate lists. Under multi-source teams, group both lists by the sources represented, such as 理论研究院 under SEED. Say when no explicit decision was recorded.
+5. **综合评估与建议** uses four or five strategic themes when supported. Each theme has an overview and separate bullets starting with the bold labels **推进较好**, **推进一般** and **待加强**, in that order. Name the team or project and give the meeting evidence for each judgment. Omit grades that lack evidence.
+6. **附录** contains the team summary sorted by document count and an inclusion table. Reconcile listed, read and analyzed counts with the date range and totals on the cover.
 
 For reports, titles marked `【保密】`, `[保密]`, or with equivalent full-width square brackets must be excluded before reading and from all counts, summaries, important-meeting lists, and generated reports. Confidential status always overrides an important marker or important attendee.
 
