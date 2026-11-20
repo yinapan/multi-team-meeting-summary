@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const JSZip = require('jszip');
@@ -53,6 +54,37 @@ function analysis(marker) {
   ].join('\n\n');
 }
 
+async function testApiModel() {
+  const { callLLM, formatGenerationMode } = require('./shared');
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      model: 'served-model-snapshot',
+      choices: [{ message: { content: 'server-generated analysis' } }]
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const reports = [];
+    const llm = {
+      mode: 'api', baseUrl: 'http://127.0.0.1:' + server.address().port,
+      apiKey: 'fixture-only', model: 'configured-routing-alias'
+    };
+    const onModel = model => reports.push(model);
+    assert.equal(await callLLM('fixture', { llm }, { onModel }), 'server-generated analysis');
+    assert.deepEqual(reports, ['served-model-snapshot'], 'API attribution follows the model in the response');
+    assert.equal(await callLLM('fixture', { llm: { ...llm, mode: 'rules' } }, { onModel }), null);
+    assert.deepEqual(reports, ['served-model-snapshot'], 'rules never claim an LLM generated content');
+    assert.equal(formatGenerationMode('rules-fallback', reports), formatGenerationMode('rules-fallback'));
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 async function testAgentFlow() {
   const tempRoot = fs.realpathSync(os.tmpdir());
   const project = fs.mkdtempSync(path.join(tempRoot, 'meeting-report-test-'));
@@ -85,30 +117,36 @@ async function testAgentFlow() {
     fs.mkdirSync(outputs);
     fs.writeFileSync(path.join(project, 'config.json'), JSON.stringify({
       teams: [{ name: 'Alpha', sources: [{ label: 'Red' }, { label: 'Blue' }] }, { name: 'Beta' }],
-      llm: { baseUrl: 'https://fixture.invalid', apiKey: 'synthetic-test-key' }
+      llm: { baseUrl: 'https://fixture.invalid', apiKey: 'synthetic-test-key', model: 'unrelated-api-model' }
     }));
     fs.writeFileSync(path.join(outputs, 'team-llm-summary-Alpha.md'), 'stale-summary-sentinel');
 
     runReport([], 75);
-    const teams = promptFiles();
+    const teams = promptFiles().sort();
     assert.equal(teams.length, 3, 'prepare all team sources in one pass');
+    const teamAnswer = (prompt, marker) => {
+      // Beta has a legacy answer without attribution. It may be rendered by a different session.
+      const source = ['Blue', 'Red'].find(label => prompt.startsWith('team-Alpha-' + label + '-'));
+      return (source ? '<!-- report-model: model-' + source + ' -->\n' : '') + analysis(marker);
+    };
     assert.ok(!fs.readdirSync(outputs).some(name => name.endsWith('.docx')));
     // A dashboard may replace the global batch between analysis stages.
     fs.writeFileSync(path.join(outputs, 'all-team-summaries.json'), '[]');
     fs.writeFileSync(path.join(outputs, 'team-summary-Alpha.json'), '{"team":"Alpha","documents":[]}');
-    fs.writeFileSync(answerPath(teams[0]), analysis('第一份摘要结论'));
+    fs.writeFileSync(answerPath(teams[0]), teamAnswer(teams[0], '第一份摘要结论'));
     fs.writeFileSync(answerPath(teams[1]), '  \n');
     runReport(['--resume-agent'], 75);
     assert.deepEqual(promptFiles().sort(), teams.sort(), 'wait for every source before preparing the comprehensive report');
 
-    fs.writeFileSync(answerPath(teams[1]), analysis('第二份摘要结论'));
-    fs.writeFileSync(answerPath(teams[2]), analysis('第三份摘要结论'));
+    fs.writeFileSync(answerPath(teams[1]), teamAnswer(teams[1], '第二份摘要结论'));
+    fs.writeFileSync(answerPath(teams[2]), teamAnswer(teams[2], '第三份摘要结论'));
     runReport(['--resume-agent'], 75);
     const comprehensive = promptFiles().filter(prompt => !teams.includes(prompt));
     assert.equal(comprehensive.length, 1);
     const input = fs.readFileSync(path.join(requests, comprehensive[0]), 'utf8');
     assert.ok(input.includes('第一份摘要结论') && input.includes('第二份摘要结论'));
     assert.ok(!input.includes('stale-summary-sentinel'));
+    assert.ok(!input.includes('<!-- report-model:'), 'team model tags must not become meeting evidence');
 
     const flatAnswer = analysis('本次综合分析结论').replace('本期两个来源均完成样本数据核验。', '样本已核验。\n\n## Beta\n\n正在验收。');
     const comprehensiveAnswer = answerPath(comprehensive[0]);
@@ -128,18 +166,46 @@ async function testAgentFlow() {
     ].join('\n'));
     fs.writeFileSync(comprehensiveAnswer, detailed.replace('• 单来源会议讨论', '单来源会议讨论'));
     assert.match(runReport(['--resume-agent'], 75), /Beta的“核心议题”须逐条使用项目符号/);
-    fs.writeFileSync(comprehensiveAnswer, detailed);
-    runReport(['--resume-agent'], 0);
+    fs.writeFileSync(comprehensiveAnswer, '<!-- report-model: synthesis-model -->\n' + detailed);
+    const completed = runReport(['--resume-agent'], 0);
+    assert.ok(completed.includes('synthesis-model'));
     assert.equal(fs.readFileSync(path.join(project, 'scans.txt'), 'utf8'), 'scan\n', 'resume must reuse the original batch');
     const stats = readStats('comprehensive-report-generation-stats.json');
     assert.equal(stats.mode, 'agent');
     assert.equal(stats.llmUsed, true);
     assert.equal(stats.documents, 3);
-    assert.equal(readStats('main-report-generation-stats.json').llmUsed, true);
+    assert.deepEqual(stats.models, ['synthesis-model']);
+    const mainStats = readStats('main-report-generation-stats.json');
+    assert.equal(mainStats.llmUsed, true);
+    assert.deepEqual(mainStats.models, ['synthesis-model']);
+    const teamStats = readStats('report-generation-stats.json').teams;
+    const alpha = teamStats.find(t => t.team === 'Alpha');
+    const beta = teamStats.find(t => t.team === 'Beta');
+    assert.deepEqual([...alpha.models].sort(), ['model-Blue', 'model-Red']);
+    assert.deepEqual(Object.fromEntries(alpha.details.map(d => [d.label, d.model])), {
+      Red: 'model-Red', Blue: 'model-Blue'
+    });
+    assert.deepEqual(beta.models.filter(Boolean), [], 'unattributed answers must not pick up another model');
+    assert.ok(!beta.details[0].model);
+    for (const team of [alpha, beta]) {
+      const doc = await JSZip.loadAsync(fs.readFileSync(path.join(outputs, team.output)));
+      const teamXml = await doc.file('word/document.xml').async('string');
+      assert.ok(!teamXml.includes('report-model:') && !teamXml.includes('unrelated-api-model'));
+      assert.equal(teamXml.includes('model-Blue'), team === alpha);
+      assert.equal(teamXml.includes('model-Red'), team === alpha);
+    }
+    const summaryFiles = fs.readdirSync(requests).filter(f => f.endsWith('.summary.md'));
+    assert.equal(summaryFiles.length, 2);
+    for (const file of summaryFiles) {
+      assert.ok(!fs.readFileSync(path.join(requests, file), 'utf8').includes('report-model:'));
+    }
     const reportFile = path.join(outputs, stats.output);
     const completedReport = fs.readFileSync(reportFile);
     const document = await JSZip.loadAsync(completedReport);
     const xml = await document.file('word/document.xml').async('string');
+    assert.ok(xml.includes('synthesis-model') && !xml.includes('report-model:'));
+    assert.ok(!xml.includes('model-Blue') && !xml.includes('model-Red') && !xml.includes('unrelated-api-model'));
+    assert.ok(!fs.readFileSync(path.join(outputs, 'comprehensive-llm-summary-0511-0524.md'), 'utf8').includes('report-model:'));
     assert.ok(xml.includes('本次综合分析结论'), 'render the actual supplied agent analysis');
     assert.ok(xml.includes('本期共 2 场会议，其中 0 场为重要会议。下文汇总 2 项核心议题、2 项关键决议。'));
     assert.ok(xml.includes('本期共 1 场会议，其中 0 场为重要会议。下文汇总 1 项核心议题、0 项关键决议。'));
@@ -169,7 +235,7 @@ async function testAgentFlow() {
 }
 
 if (require.main === module) {
-  testAgentFlow().then(() => console.log('agent report flow tests passed')).catch(error => {
+  testApiModel().then(testAgentFlow).then(() => console.log('agent report flow tests passed')).catch(error => {
     console.error(error);
     process.exitCode = 1;
   });

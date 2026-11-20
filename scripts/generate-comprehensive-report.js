@@ -556,6 +556,7 @@ async function main() {
   let analyticalElements;
   let llmTruncated = false;
   let generationMode = 'unknown';
+  let analysisModel = null;
   const ruleFallbackSections = [];
   const prompt = buildComprehensiveReportPrompt(teamDataList, {
     startDate, endDate, grandTotalDocs: reportCounts.analyzedDocumentCount, teamCount,
@@ -568,6 +569,7 @@ async function main() {
   console.log(`综合报告分析模式：${mode}，输入 ${(prompt.length / 1024).toFixed(1)}KB`);
   let llmResult = await callLLM(prompt, config, {
     startDate, endDate,
+    onModel: name => { analysisModel = name; },
     formatAnswer: (answer, pending) => formatAgentTeamSections(answer, teamDataList, multiSourceSet, pending)
   });
   if (llmResult) {
@@ -605,17 +607,17 @@ async function main() {
       analyticalElements.push(...buildFallbackSection5(teamDataList, reportCounts.analyzedDocumentCount));
     }
   }
-  console.log(`综合报告生成模式: ${formatGenerationMode(generationMode)}`);
+  const llmUsed = generationMode === 'agent' || generationMode === 'llm' || generationMode === 'llm-with-rules-supplement';
+  const models = llmUsed ? [analysisModel] : [];
+  const generationModeLabel = formatGenerationMode(generationMode, models);
+  console.log(`综合报告生成模式: ${generationModeLabel}`);
 
   const batchStatsFile = findInputFile('batch-read-stats.json');
   const batchStats = fs.existsSync(batchStatsFile) ? JSON.parse(fs.readFileSync(batchStatsFile, 'utf-8')) : null;
   const dataSourceMode = batchStats && (batchStats.mode === 'cache-rebuild' || batchStats.cacheRebuildUsed)
     ? 'cache-rebuild'
     : 'direct-read';
-  const llmUsed = generationMode === 'agent' || generationMode === 'llm' || generationMode === 'llm-with-rules-supplement';
-  const generationLabel = generationMode === 'agent'
-    ? '当前会话 agent（LLM）生成分析内容'
-    : (llmUsed ? '已使用 LLM 生成分析内容' : '未使用 LLM，使用规则回退生成');
+  const generationLabel = llmUsed ? `${generationModeLabel} 生成综合分析` : '未使用 LLM，使用规则回退生成';
   const dataSourceLabel = dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中';
 
   const dateLabel = `${now.getFullYear()}年${formatDateChinese(startDate)} - ${formatDateChinese(endDate)}`;
@@ -703,6 +705,7 @@ async function main() {
     endDate,
     generatedAt: new Date().toISOString(),
     mode: generationMode,
+    models,
     ruleFallbackSections,
     llmUsed,
     rulesFallbackUsed: generationMode === 'rules-fallback' || ruleFallbackSections.length > 0,
@@ -722,6 +725,7 @@ async function main() {
     output: outFile,
     statsFile,
     mode: generationMode,
+    models,
     llmUsed,
     timingSummary: `会议清单 ${reportCounts.meetingListCount} 条，成功读取 ${reportCounts.successfulReadCount} 份，纳入分析 ${reportCounts.analyzedDocumentCount} 份，覆盖团队 ${teamCount} 个，数据来源：${dataSourceLabel}`
   });

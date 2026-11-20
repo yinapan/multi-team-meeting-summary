@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
-const { normalizeDate, outputPath } = require('./shared');
+const { normalizeDate, normalizeReportModel, outputPath } = require('./shared');
 
 function reportMode(config = {}) {
   const mode = config.llm?.mode ?? 'agent';
@@ -36,7 +36,7 @@ function teamSummaryPath(startDate, endDate, team, documents) {
   return path.join(agentRunDir(startDate, endDate), `team-${fileLabel(team)}-${key}.summary.md`);
 }
 
-function requestAgentAnalysis(prompt, { startDate, endDate, team, label, formatAnswer } = {}) {
+function requestAgentAnalysis(prompt, { startDate, endDate, team, label, formatAnswer, onModel } = {}) {
   const directory = agentRunDir(startDate, endDate);
   const topic = team ? 'team-' + fileLabel([team, label].filter(Boolean).join('-')) : 'report';
   const stem = path.join(directory, `${topic}-${fingerprint([team, label, prompt])}`);
@@ -56,10 +56,17 @@ function requestAgentAnalysis(prompt, { startDate, endDate, team, label, formatA
     if (error.code !== 'ENOENT') throw error;
   }
   function pending(reason) {
-    const error = new Error(`${reason}\n当前 agent 请读取 ${promptPath}，将分析正文保存为 ${answerPath}`);
+    const error = new Error(`${reason}能确认实际模型时，在答案首行用 <!-- report-model: 模型ID --> 记录。\n当前 agent 请读取 ${promptPath}，将分析正文保存为 ${answerPath}`);
     return Object.assign(error, { code: 'AGENT_ANALYSIS_PENDING', promptPath, answerPath });
   }
   if (!answer) throw pending('等待当前会话分析。');
+  let model = null;
+  if (answer.startsWith('<!-- report-model:')) {
+    const header = /^<!-- report-model:[ \t]*([^\r\n]*?)[ \t]*-->[ \t]*(?:\r?\n|$)/.exec(answer);
+    model = normalizeReportModel(header?.[1]);
+    if (!model) throw pending('请在答案首行的 report-model 注释中填写当前模型的名称。');
+    answer = answer.slice(header[0].length).trimStart();
+  }
   const sections = [...answer.matchAll(/^#{1,2}[ \t]+(1\.2\b|[二三四五][、.．])/gm)];
   if (answer === prompt.trim() || !/^##?\s+1\.2\b/.test(answer) ||
       sections.map(match => match[1][0]).join('') !== '1二三四五' ||
@@ -67,8 +74,9 @@ function requestAgentAnalysis(prompt, { startDate, endDate, team, label, formatA
         .split('\n').some(line => line.trim() && !line.trimStart().startsWith('#')))) {
     throw pending('请补全第一至第五章的标题及正文。');
   }
-  if (formatAnswer) return formatAnswer(answer, pending);
-  return answer;
+  const result = formatAnswer ? formatAnswer(answer, pending) : answer;
+  onModel?.(model);
+  return result;
 }
 
 module.exports = { reportMode, agentRunDir, teamSummaryPath, requestAgentAnalysis };

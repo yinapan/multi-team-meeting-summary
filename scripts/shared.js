@@ -71,9 +71,22 @@ function getKdocsCliArgs(args = []) {
   return cfg.token ? ['--token', cfg.token, ...args] : args;
 }
 
-function formatGenerationMode(mode) {
-  if (mode === 'agent') return '当前会话 agent（LLM）';
-  if (mode === 'llm' || mode === 'llm-with-rules-supplement') return 'LLM';
+function normalizeReportModel(value) {
+  if (typeof value !== 'string' || /[\r\n]/.test(value)) return null;
+  const name = value.trim();
+  return /^[\p{L}\p{N}@][\p{L}\p{N} ._:@/+~-]{0,199}$/u.test(name) ? name : null;
+}
+
+function formatGenerationMode(mode, models = []) {
+  if (['agent', 'llm', 'llm-with-rules-supplement'].includes(mode)) {
+    const unique = new Set(models.map(normalizeReportModel));
+    const missing = unique.delete(null);
+    const names = [...unique];
+    if (names.length === 0) names.push('模型未记录');
+    else if (missing) names.push('部分模型未记录');
+    const label = mode === 'agent' ? '当前会话 agent' : 'LLM';
+    return `${label}（${names.join('、')}）`;
+  }
   if (mode === 'rules-fallback') return '规则回退';
   if (mode === 'skipped') return '跳过';
   if (mode === 'error') return '失败';
@@ -84,7 +97,7 @@ function printAiReviewWarning(context = {}) {
   const title = context.title || '报告';
   const output = context.output ? `\n输出文件：${context.output}` : '';
   const stats = context.statsFile ? `\n生成统计：${context.statsFile}` : '';
-  const mode = context.mode ? `\n生成方式：${formatGenerationMode(context.mode)}` : '';
+  const mode = context.mode ? `\n生成方式：${formatGenerationMode(context.mode, context.models)}` : '';
   const llmUsed = typeof context.llmUsed === 'boolean'
     ? `\n是否使用 LLM：${context.llmUsed ? '是' : '否'}`
     : '';
@@ -3056,6 +3069,7 @@ function callLLMApi(baseUrl, apiKey, model, prompt, timeout, options = {}) {
       res.on('data', chunk => { chunks.push(chunk); });
       res.on('end', () => {
         try {
+          if (res.statusCode < 200 || res.statusCode >= 300) return resolve(null);
           const data = Buffer.concat(chunks).toString('utf-8');
           const json = JSON.parse(data);
           const choice = json.choices && json.choices[0];
@@ -3063,7 +3077,9 @@ function callLLMApi(baseUrl, apiKey, model, prompt, timeout, options = {}) {
           if (choice && choice.finish_reason === 'length') {
             console.log(`⚠️ [callLLMApi] finish_reason=length — 输出被 max_tokens(${maxTokens}) 截断`);
           }
-          resolve(content ? content.trim() : null);
+          const answer = typeof content === 'string' ? content.trim() : '';
+          if (answer) options.onModel?.(normalizeReportModel(json.model));
+          resolve(answer || null);
         } catch (e) {
           process.stderr.write(`[callLLMApi] 响应解析失败: ${e.message.substring(0, 100)}\n`);
           resolve(null);
@@ -3112,7 +3128,7 @@ async function callLLM(prompt, config = {}, context) {
   }
   const baseTimeout = llmCfg.timeout || 300000;
   const timeout = Math.min(Math.max(baseTimeout, Math.ceil(prompt.length / 1024) * 5000), 600000);
-  return callLLMApi(llmCfg.baseUrl, llmCfg.apiKey, llmCfg.model || 'default', prompt, timeout);
+  return callLLMApi(llmCfg.baseUrl, llmCfg.apiKey, llmCfg.model || 'default', prompt, timeout, { onModel: context?.onModel });
 }
 
 // ========== 综合报告 prompt ==========
@@ -3822,7 +3838,7 @@ module.exports = {
   readDocOnceAsync, readDocAsync, runPool,
   RequestPacer, sleep, getSkillConfig, getKdocsConfig, getStorageProvider, getWps365Config,
   getKdocsCliPath, getKdocsCliEnv, getKdocsCliArgs, getWps365CliPath, getWps365CliEnv, classifyRateLimitCode,
-  formatGenerationMode, printAiReviewWarning,
+  normalizeReportModel, formatGenerationMode, printAiReviewWarning,
   getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
   normalizeTitle, normalizeForMatch, charSimilarity,
   sleepSync,

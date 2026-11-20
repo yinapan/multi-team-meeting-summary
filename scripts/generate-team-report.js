@@ -268,7 +268,7 @@ function buildMultiSourceContent(data, teamName, labelGroups, labelAnalyses, opt
 }
 
 // ========== 生成单团队报告 ==========
-function generateReport(data, teamName, startDate, endDate, analyticalElements, generationMode) {
+function generateReport(data, teamName, startDate, endDate, analyticalElements, generationMode, models) {
   const totalDocs = data.documents.length;
   const totalScanned = data.totalScanned || totalDocs;
   const inclusionRate = totalScanned > 0 ? Math.round((totalDocs / totalScanned) * 100) : 100;
@@ -296,7 +296,7 @@ function generateReport(data, teamName, startDate, endDate, analyticalElements, 
         footers: { default: makeFooter() },
         children: [
           h1("一、执行摘要"),
-          p(`生成方式：${formatGenerationMode(generationMode)}`),
+          p(`生成方式：${formatGenerationMode(generationMode, models)}`),
           h2("1.1 核心发现"),
           new Table({ columnWidths: [3000, 6026], rows: [
             new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 6026)] }),
@@ -422,8 +422,12 @@ async function main() {
         startDate, endDate, isMultiSource: hasMultiLabels, reportLimits
       });
       let result;
+      let model = null;
       try {
-        result = await callLLM(prompt, config, { startDate, endDate, team: teamName, label });
+        result = await callLLM(prompt, config, {
+          startDate, endDate, team: teamName, label,
+          onModel: name => { model = name; }
+        });
       } catch (error) {
         if (error.code !== 'AGENT_ANALYSIS_PENDING') throw error;
         pending.push(error.message);
@@ -440,7 +444,7 @@ async function main() {
         fs.writeFileSync(outputPath(`team-llm-summary-${teamName}-${label}.md`), markdown, 'utf-8');
       }
       summaries.push(hasMultiLabels ? `## ${label}\n\n${markdown}` : markdown);
-      generationDetails.push({ label, mode: llmMode, bytes: Buffer.byteLength(markdown, 'utf-8') });
+      generationDetails.push({ label, mode: llmMode, model, bytes: Buffer.byteLength(markdown, 'utf-8') });
     }
     if (pending.length > 0) {
       console.log(pending.join('\n'));
@@ -460,8 +464,9 @@ async function main() {
         : buildFallbackContent(data, analysis, teamName, options);
     }
 
-    console.log(`[${teamName}] 生成模式: ${formatGenerationMode(generationMode)}`);
-    const doc = generateReport(data, teamName, startDate, endDate, analyticalElements, generationMode);
+    const models = [...new Set(generationDetails.filter(detail => detail.mode === llmMode).map(detail => detail.model))];
+    console.log(`[${teamName}] 生成模式: ${formatGenerationMode(generationMode, models)}`);
+    const doc = generateReport(data, teamName, startDate, endDate, analyticalElements, generationMode, models);
     const buffer = await Packer.toBuffer(doc);
 
     let outFile = outputPath(`${teamName}-会议记录汇总分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
@@ -484,6 +489,7 @@ async function main() {
     reportGenerationStats.push({
       team: teamName,
       mode: generationMode,
+      models,
       llmUsed: generationMode === 'agent' || generationMode === 'llm',
       documents: data.documents.length,
       output: path.basename(outFile),
@@ -539,6 +545,7 @@ async function main() {
     output: 'outputs/*-会议记录汇总分析报告-*.docx',
     statsFile,
     mode: llmCount > 0 ? (mode === 'agent' ? 'agent' : 'llm') : (fallbackCount > 0 ? 'rules-fallback' : 'skipped'),
+    models: [...new Set(reportGenerationStats.flatMap(team => team.models || []))],
     llmUsed: llmCount > 0,
     timingSummary: `LLM ${llmCount} 个，规则回退 ${fallbackCount} 个，跳过 ${skippedCount} 个，失败 ${errorCount} 个${elapsedTeams ? `；${elapsedTeams}` : ''}`
   });

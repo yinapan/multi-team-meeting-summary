@@ -167,6 +167,7 @@ function main() {
   const timingSummary = timings.map(t => `${t.module}:${t.elapsedSec}s`).join('；');
   const llmUsed = Boolean(teamStats?.summary?.llm || comprehensiveStats?.llmUsed);
   const mode = comprehensiveStats?.mode || (llmUsed ? 'llm' : 'rules-fallback');
+  const models = comprehensiveStats.models || [];
 
   const orchestrationStats = {
     type: 'main-report-flow',
@@ -174,6 +175,7 @@ function main() {
     endDate,
     generatedAt: new Date().toISOString(),
     mode,
+    models,
     llmUsed,
     dataSourceMode,
     cacheRebuildReason: dataSourceMode === 'cache-rebuild'
@@ -192,6 +194,7 @@ function main() {
     output: outputPath(comprehensiveStats.output),
     statsFile,
     mode,
+    models,
     llmUsed,
     timingSummary: `${timingSummary}；数据来源:${dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中'}`
   });
