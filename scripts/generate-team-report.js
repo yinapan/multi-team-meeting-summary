@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { reportMode, teamSummaryPath } = require('./report-agent');
 const {
   C, FONT, hCell, cCell, bullet, h1, h2, h3, p, pb,
   makeHeader, makeFooter, makeCoverPage,
@@ -267,7 +268,7 @@ function buildMultiSourceContent(data, teamName, labelGroups, labelAnalyses, opt
 }
 
 // ========== 生成单团队报告 ==========
-function generateReport(data, teamName, startDate, endDate, analyticalElements) {
+function generateReport(data, teamName, startDate, endDate, analyticalElements, generationMode) {
   const totalDocs = data.documents.length;
   const totalScanned = data.totalScanned || totalDocs;
   const inclusionRate = totalScanned > 0 ? Math.round((totalDocs / totalScanned) * 100) : 100;
@@ -295,14 +296,15 @@ function generateReport(data, teamName, startDate, endDate, analyticalElements) 
         footers: { default: makeFooter() },
         children: [
           h1("一、执行摘要"),
+          p(`生成方式：${formatGenerationMode(generationMode)}`),
           h2("1.1 核心发现"),
           new Table({ columnWidths: [3000, 6026], rows: [
             new TableRow({ tableHeader: true, children: [hCell("统计项", 3000), hCell("数值", 6026)] }),
             new TableRow({ children: [cCell("会议记录总数", 3000), cCell(`${totalDocs}份`, 6026)] }),
             new TableRow({ children: [cCell("覆盖部门/项目数", 3000), cCell(teamName, 6026)] }),
             new TableRow({ children: [cCell("时间跨度", 3000), cCell(`${now.getFullYear()}.${startDate} - ${endDate}`, 6026)] }),
-            new TableRow({ children: [cCell("核心议题数量", 3000), cCell(`${data._analysis.totalConclusions}`, 6026)] }),
-            new TableRow({ children: [cCell("关键决议数量", 3000), cCell(`${data._analysis.totalTodos}`, 6026)] }),
+            new TableRow({ children: [cCell("提取的结论条数", 3000), cCell(`${data._analysis.totalConclusions}`, 6026)] }),
+            new TableRow({ children: [cCell("提取的待办条数", 3000), cCell(`${data._analysis.totalTodos}`, 6026)] }),
             ...(importantCount > 0 ? [new TableRow({ children: [cCell("重要会议数量", 3000), cCell(`${importantCount}份`, 6026)] })] : [])
           ]}),
 
@@ -348,6 +350,7 @@ async function main() {
   const workspaceDir = resolveWorkspaceDir();
 
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf-8'));
+  const mode = reportMode(config);
   const reportLimits = getReportLimits(config);
   const reportGenerationStats = [];
 
@@ -376,7 +379,7 @@ async function main() {
       const documents = [];
       for (const wData of Object.values(teamEntry.weeks)) {
         for (const m of wData.meetings) {
-          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important, rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null, meetingDate: m.meetingDate || null });
+          documents.push({ name: m.title, conclusions: m.conclusions || [], todos: m.todos || [], important: m.important || isImportantMeetingTitle(m.title), rawContent: m.rawContent || '', sourceLabel: m.sourceLabel || null, meetingDate: m.meetingDate || null });
         }
       }
       data = { team: teamName, documents };
@@ -388,7 +391,7 @@ async function main() {
           important: d.important || isImportantMeetingTitle(d.name || d.title)
         }))
         .filter(d =>
-          d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '')
+          d.meetingDate ? meetingDateInRange(d.meetingDate, startDate, endDate) : dateInRange(d.name, startDate, endDate, d.rawContent || '', d.mtime || null, d.ctime || null, d.folderName || null)
         )
     );
     if (data.documents.length === 0) {
@@ -402,103 +405,86 @@ async function main() {
 
     // === 生成分析内容 ===
     let analyticalElements;
-    let generationMode = 'unknown';
     const generationDetails = [];
     const isMultiSource = isMultiSourceTeam(team);
     const labelGroups = isMultiSource ? groupByLabel(data.documents, teamName) : null;
     const hasMultiLabels = labelGroups && labelGroups.size > 1;
 
-    if (hasMultiLabels) {
-      // 多 source 团队：按 label 分别生成 LLM 摘要
-      console.log(`[${teamName}] 多 source 团队 (${[...labelGroups.keys()].join(', ')})，按 label 分别处理`);
-      const labelAnalyses = new Map();
-      for (const [label, docs] of labelGroups) {
-        const labelAnalysis = analyzeDocs(docs, teamName, { startDate, endDate, label });
-        labelAnalyses.set(label, labelAnalysis);
-
-        const labelData = { ...data, documents: docs };
-        const prompt = buildTeamReportPrompt(labelData, labelAnalysis, teamName, { startDate, endDate, isMultiSource: true, reportLimits });
-        console.log(`  [${label}] 调用 LLM（${(prompt.length / 1024).toFixed(1)}KB prompt, ${docs.length}篇）...`);
-        let llmResult = await callLLM(prompt, config);
-        if (llmResult) {
-          llmResult = normalizeMultiSourceBulletPrefixes(llmResult, [teamName], {
-            expectedLabels: { [teamName]: label }
-          });
-          console.log(`  [${label}] LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB`);
-          const summaryFile = outputPath(`team-llm-summary-${teamName}-${label}.md`);
-          fs.writeFileSync(summaryFile, llmResult, 'utf-8');
-          generationDetails.push({ label, mode: 'llm', bytes: Buffer.byteLength(llmResult, 'utf-8') });
-        } else {
-          generationDetails.push({ label, mode: 'rules-fallback', reason: 'llm unavailable or empty' });
-        }
+    const groups = hasMultiLabels ? labelGroups : [[null, data.documents]];
+    const labelAnalyses = new Map();
+    const summaries = [];
+    const pending = [];
+    const llmMode = mode === 'agent' ? 'agent' : 'llm';
+    for (const [label, documents] of groups) {
+      const groupAnalysis = hasMultiLabels ? analyzeDocs(documents, teamName, { startDate, endDate, label }) : analysis;
+      labelAnalyses.set(label, groupAnalysis);
+      const prompt = buildTeamReportPrompt({ ...data, documents }, groupAnalysis, teamName, {
+        startDate, endDate, isMultiSource: hasMultiLabels, reportLimits
+      });
+      let result;
+      try {
+        result = await callLLM(prompt, config, { startDate, endDate, team: teamName, label });
+      } catch (error) {
+        if (error.code !== 'AGENT_ANALYSIS_PENDING') throw error;
+        pending.push(error.message);
+        continue;
       }
-      // 团队汇总 LLM 摘要：合并所有 label 的 LLM 输出
-      const allLabelSummaries = [];
-      for (const [label] of labelGroups) {
-        const sf = findInputFile(`team-llm-summary-${teamName}-${label}.md`);
-        if (fs.existsSync(sf)) allLabelSummaries.push(`## ${label}\n\n${fs.readFileSync(sf, 'utf-8')}`);
+      if (!result) {
+        if (mode === 'agent') throw new Error('agent 分析为空，请补全对应的 Markdown。');
+        generationDetails.push({ label, mode: 'rules-fallback', reason: 'llm unavailable or empty' });
+        continue;
       }
-      if (allLabelSummaries.length > 0) {
-        const combined = normalizeMultiSourceBulletPrefixes(allLabelSummaries.join('\n\n---\n\n'), [teamName]);
-        fs.writeFileSync(outputPath(`team-llm-summary-${teamName}.md`), combined, 'utf-8');
-        console.log(`[${teamName}] 合并 LLM 摘要 ${(combined.length / 1024).toFixed(1)}KB，解析中...`);
-        analyticalElements = parseReportMarkdown(combined);
-        if (analyticalElements && analyticalElements.length > 0) generationMode = 'llm';
+      const prefixOptions = hasMultiLabels ? { expectedLabels: { [teamName]: label } } : {};
+      const markdown = normalizeMultiSourceBulletPrefixes(result, [teamName], prefixOptions);
+      if (hasMultiLabels && mode !== 'agent') {
+        fs.writeFileSync(outputPath(`team-llm-summary-${teamName}-${label}.md`), markdown, 'utf-8');
       }
-      if (!analyticalElements || analyticalElements.length === 0) {
-        console.log(`[${teamName}] LLM 解析无结果，使用规则分析...`);
-        generationMode = 'rules-fallback';
-        analyticalElements = buildMultiSourceContent(data, teamName, labelGroups, labelAnalyses, {
-          totalDocs: data.documents.length,
-          importantCount: data.documents.filter(d => d.important).length,
-          reportLimits
-        });
-      }
-    } else {
-      // 单 source 团队：原有逻辑
-      const prompt = buildTeamReportPrompt(data, analysis, teamName, { startDate, endDate, reportLimits });
-      console.log(`[${teamName}] 调用 LLM 生成分析（${(prompt.length / 1024).toFixed(1)}KB prompt）...`);
-      let llmResult = await callLLM(prompt, config);
-      if (llmResult) {
-        llmResult = normalizeMultiSourceBulletPrefixes(llmResult, [teamName]);
-        console.log(`[${teamName}] LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB，解析中...`);
-        analyticalElements = parseReportMarkdown(llmResult);
-        const summaryFile = outputPath(`team-llm-summary-${teamName}.md`);
-        fs.writeFileSync(summaryFile, llmResult, 'utf-8');
-        if (analyticalElements && analyticalElements.length > 0) generationMode = 'llm';
-      }
-      if (!analyticalElements || analyticalElements.length === 0) {
-        console.log(`[${teamName}] LLM 不可用，使用规则分析...`);
-        generationMode = 'rules-fallback';
-        analyticalElements = buildFallbackContent(data, analysis, teamName, {
-          totalDocs: data.documents.length,
-          importantCount: data.documents.filter(d => d.important).length,
-          reportLimits
-        });
-      }
+      summaries.push(hasMultiLabels ? `## ${label}\n\n${markdown}` : markdown);
+      generationDetails.push({ label, mode: llmMode, bytes: Buffer.byteLength(markdown, 'utf-8') });
+    }
+    if (pending.length > 0) {
+      console.log(pending.join('\n'));
+      reportGenerationStats.push({ team: teamName, mode: 'pending', documents: data.documents.length, pending });
+      return;
     }
 
-    console.log(`[${teamName}] 生成模式: ${generationMode === 'llm' ? 'LLM' : generationMode === 'rules-fallback' ? '规则回退' : generationMode}`);
-    const doc = generateReport(data, teamName, startDate, endDate, analyticalElements);
+    const summary = summaries.join('\n\n---\n\n');
+    analyticalElements = parseReportMarkdown(summary);
+    let generationMode = llmMode;
+    if (analyticalElements.length === 0) {
+      if (mode === 'agent') throw new Error('无法解析 agent 的团队报告 Markdown。');
+      generationMode = 'rules-fallback';
+      const options = { totalDocs: data.documents.length, importantCount: data.documents.filter(d => d.important).length, reportLimits };
+      analyticalElements = hasMultiLabels
+        ? buildMultiSourceContent(data, teamName, labelGroups, labelAnalyses, options)
+        : buildFallbackContent(data, analysis, teamName, options);
+    }
+
+    console.log(`[${teamName}] 生成模式: ${formatGenerationMode(generationMode)}`);
+    const doc = generateReport(data, teamName, startDate, endDate, analyticalElements, generationMode);
     const buffer = await Packer.toBuffer(doc);
 
-    const outFile = outputPath(`${teamName}-会议记录汇总分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
+    let outFile = outputPath(`${teamName}-会议记录汇总分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
     try {
       fs.writeFileSync(outFile, buffer);
     } catch (e) {
-      if (e.code === 'EBUSY') {
-        const ts = new Date().toISOString().replace(/[T:]/g, '-').substring(0, 16);
-        const altFile = outputPath(`${teamName}-会议记录汇总分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
-        fs.writeFileSync(altFile, buffer);
-        console.log(`${teamName} 原文件被占用，已另存为: ${path.basename(altFile)}`);
-        return;
-      }
-      throw e;
+      if (e.code !== 'EBUSY') throw e;
+      const ts = new Date().toISOString().replace(/[T:]/g, '-').substring(0, 16);
+      outFile = outputPath(`${teamName}-会议记录汇总分析报告-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
+      fs.writeFileSync(outFile, buffer);
+    }
+    if (summary) {
+      const summaryFile = mode === 'agent'
+        ? teamSummaryPath(startDate, endDate, teamName, data.documents)
+        : outputPath(`team-llm-summary-${teamName}.md`);
+      fs.mkdirSync(path.dirname(summaryFile), { recursive: true });
+      fs.writeFileSync(summaryFile, summary, 'utf-8');
     }
     console.log(`${teamName} 报告已生成: ${(buffer.length / 1024).toFixed(1)}KB -> ${path.basename(outFile)}`);
     reportGenerationStats.push({
       team: teamName,
       mode: generationMode,
+      llmUsed: generationMode === 'agent' || generationMode === 'llm',
       documents: data.documents.length,
       output: path.basename(outFile),
       elapsedSec: Number(((Date.now() - startedAt) / 1000).toFixed(1)),
@@ -523,24 +509,27 @@ async function main() {
   const workerCount = Math.min(reportConcurrency, teams.length);
   console.log(`团队报告并发数: ${workerCount}`);
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  const llmCount = reportGenerationStats.filter(s => s.mode === 'agent' || s.mode === 'llm').length;
+  const fallbackCount = reportGenerationStats.filter(s => s.mode === 'rules-fallback').length;
+  const skippedCount = reportGenerationStats.filter(s => s.mode === 'skipped').length;
+  const pendingCount = reportGenerationStats.filter(s => s.mode === 'pending').length;
+  const errorCount = reportGenerationStats.filter(s => s.mode === 'error').length;
   const statsFile = writeOutputJson('report-generation-stats.json', {
     type: 'team-reports',
     startDate,
     endDate,
     generatedAt: new Date().toISOString(),
     summary: {
-      llm: reportGenerationStats.filter(s => s.mode === 'llm').length,
-      rulesFallback: reportGenerationStats.filter(s => s.mode === 'rules-fallback').length,
-      skipped: reportGenerationStats.filter(s => s.mode === 'skipped').length,
-      error: reportGenerationStats.filter(s => s.mode === 'error').length
+      llm: llmCount, rulesFallback: fallbackCount, skipped: skippedCount, pending: pendingCount, error: errorCount
     },
     teams: reportGenerationStats
   });
   console.log(`报告生成模式统计: ${statsFile}`);
-  const llmCount = reportGenerationStats.filter(s => s.mode === 'llm').length;
-  const fallbackCount = reportGenerationStats.filter(s => s.mode === 'rules-fallback').length;
-  const skippedCount = reportGenerationStats.filter(s => s.mode === 'skipped').length;
-  const errorCount = reportGenerationStats.filter(s => s.mode === 'error').length;
+  if (errorCount || pendingCount) {
+    console.log(`待 agent 完成 ${pendingCount} 个团队，生成失败 ${errorCount} 个团队。`);
+    process.exitCode = errorCount ? 1 : 75;
+    return;
+  }
   const elapsedTeams = reportGenerationStats
     .filter(s => typeof s.elapsedSec === 'number')
     .map(s => `${s.team}:${s.elapsedSec}s`)
@@ -549,7 +538,7 @@ async function main() {
     title: '各团队会议记录汇总报告',
     output: 'outputs/*-会议记录汇总分析报告-*.docx',
     statsFile,
-    mode: llmCount > 0 ? 'llm' : (fallbackCount > 0 ? 'rules-fallback' : 'skipped'),
+    mode: llmCount > 0 ? (mode === 'agent' ? 'agent' : 'llm') : (fallbackCount > 0 ? 'rules-fallback' : 'skipped'),
     llmUsed: llmCount > 0,
     timingSummary: `LLM ${llmCount} 个，规则回退 ${fallbackCount} 个，跳过 ${skippedCount} 个，失败 ${errorCount} 个${elapsedTeams ? `；${elapsedTeams}` : ''}`
   });
@@ -570,4 +559,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch(error => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

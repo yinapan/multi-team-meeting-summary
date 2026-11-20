@@ -14,6 +14,7 @@
     "邹涛"
   ],
   "llm": {
+    "mode": "agent",
     "timeout": 300000,
     "teamReportConcurrency": 5
   },
@@ -255,6 +256,11 @@
             "3月": "hiXZAMhmF1MDqRvF33rW1xAhuyNnEt3Vf"
           },
           "root_folder_id": "m8gR4HaUP1MQi3E1wjNt1x6UmYLN3UxQG"
+        },
+        {
+          "label": "理论研究院",
+          "drive_id": "AzpXvOL",
+          "root_folder_id": "vMg1Suh1orMuJ1PqP9Qyrx1QYqUXkoFDt"
         }
       ]
     },

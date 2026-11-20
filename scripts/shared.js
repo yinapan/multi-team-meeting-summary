@@ -72,6 +72,7 @@ function getKdocsCliArgs(args = []) {
 }
 
 function formatGenerationMode(mode) {
+  if (mode === 'agent') return '当前会话 agent（LLM）';
   if (mode === 'llm' || mode === 'llm-with-rules-supplement') return 'LLM';
   if (mode === 'rules-fallback') return '规则回退';
   if (mode === 'skipped') return '跳过';
@@ -1957,6 +1958,10 @@ function legacyPath(fileName) {
 }
 
 function findInputFile(fileName) {
+  const snapshot = process.env.MEETING_REPORT_INPUT_DIR;
+  if (snapshot && /^(?:all-team-summaries|batch-read-stats|team-summary-[^/\\]+|meeting-baseline-[^/\\]+)\.json$/.test(fileName)) {
+    return path.join(snapshot, fileName);
+  }
   const modern = path.join(resolveWorkspaceDir(), 'outputs', fileName);
   if (fs.existsSync(modern)) return modern;
   const legacy = legacyPath(fileName);
@@ -3094,98 +3099,20 @@ function resolveConfigPlaceholders(obj) {
   return result;
 }
 
-// ========== 读取 OpenClaw 所有 provider ==========
-function resolveOpenClawConfigPath() {
-  const candidates = [];
-  // 1. 从脚本路径往上推导 .openclaw 目录
-  const scriptDir = path.resolve(__dirname);
-  const ocIdx = scriptDir.indexOf('.openclaw');
-  if (ocIdx >= 0) {
-    candidates.push(path.join(scriptDir.substring(0, ocIdx + '.openclaw'.length), 'openclaw.json'));
-  }
-  // 2. 从 cwd 往上推导
-  const cwd = process.cwd();
-  const cwdIdx = cwd.indexOf('.openclaw');
-  if (cwdIdx >= 0) {
-    candidates.push(path.join(cwd.substring(0, cwdIdx + '.openclaw'.length), 'openclaw.json'));
-  }
-  // 3. 环境变量
-  const home = process.env.OPENCLAW_HOME || process.env.USERPROFILE || process.env.HOME;
-  if (home) candidates.push(path.join(home, '.openclaw', 'openclaw.json'));
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
+// 报告默认由运行 Skill 的当前 agent 分析。
+async function callLLM(prompt, config = {}, context) {
+  const { reportMode, requestAgentAnalysis } = require('./report-agent');
+  const mode = reportMode(config);
+  if (mode === 'agent') return requestAgentAnalysis(prompt, context);
+  if (mode === 'rules') return null;
 
-function resolveOpenClawProviders() {
-  const providers = [];
-  try {
-    const cfgPath = resolveOpenClawConfigPath();
-    if (!cfgPath) return providers;
-    const data = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-    const provMap = data.models?.providers || {};
-    const preferredModels = ['mimo-v2.5', 'mco-4', 'mimo-v2-pro', 'glm-5.1', 'deepseek-v3.2', 'kimi-k2.5'];
-    for (const [name, cfg] of Object.entries(provMap)) {
-      const resolvedCfg = resolveConfigPlaceholders(cfg);
-      if (!resolvedCfg.baseUrl || !resolvedCfg.apiKey) continue;
-      const models = resolvedCfg.models || [];
-      const picked = preferredModels
-        .map(id => models.find(m => m.id === id))
-        .find(Boolean) || models[0];
-      if (!picked) continue;
-      providers.push({
-        providerName: name,
-        baseUrl: resolvedCfg.baseUrl.replace(/\/+$/, ''),
-        apiKey: resolvedCfg.apiKey,
-        model: picked.id
-      });
-    }
-  } catch (e) {
-    process.stderr.write(`[resolveOpenClawProviders] ${e.message}\n`);
+  const llmCfg = resolveConfigPlaceholders(config.llm);
+  if (!llmCfg.baseUrl || !llmCfg.apiKey) {
+    throw new Error('api 模式需要在项目配置中指定 llm.baseUrl 和 llm.apiKey。');
   }
-  return providers;
-}
-
-// ========== 通用 LLM 调用（多后端自动选择） ==========
-async function callLLM(prompt, config = {}) {
-  const llmCfg = config.llm || {};
   const baseTimeout = llmCfg.timeout || 300000;
-  const promptKB = Math.ceil(prompt.length / 1024);
-  const timeout = Math.min(Math.max(baseTimeout, promptKB * 5000), 600000);
-  if (timeout > baseTimeout) {
-    console.log(`[callLLM] prompt ${promptKB}KB 较大，超时自动调整为 ${Math.round(timeout / 1000)}s`);
-  }
-
-  // 1. config.json 显式配了 API 地址（支持 ${ENV_VAR} 占位符）
-  if (llmCfg.baseUrl && llmCfg.apiKey) {
-    const resolved = resolveConfigPlaceholders(llmCfg);
-    const model = resolved.model || 'default';
-    console.log(`[callLLM] 使用配置的 API: ${resolved.baseUrl} (model: ${model})`);
-    const result = await callLLMApi(resolved.baseUrl, resolved.apiKey, model, prompt, timeout);
-    if (result) return result;
-    console.log('[callLLM] API 调用失败，尝试下一个后端...');
-  }
-
-  // 2. 自动检测 OpenClaw 环境（遍历所有 provider 逐个回退）
-  const providers = resolveOpenClawProviders();
-  if (providers.length === 0) {
-    const cfgPath = resolveOpenClawConfigPath();
-    console.log(`[callLLM] OpenClaw 配置查找: ${cfgPath || '未找到 openclaw.json'}（__dirname=${__dirname}, cwd=${process.cwd()}）`);
-  }
-  for (const oc of providers) {
-    console.log(`[callLLM] 尝试 OpenClaw provider: ${oc.providerName} / ${oc.model} (${oc.baseUrl})`);
-    const result = await callLLMApi(oc.baseUrl, oc.apiKey, oc.model, prompt, timeout);
-    if (result) return result;
-    console.log(`[callLLM] ${oc.providerName} 调用失败，尝试下一个...`);
-  }
-
-  if (providers.length === 0 && !llmCfg.baseUrl) {
-    console.log('[callLLM] 无可用 LLM 后端（config.json 未配置 API，OpenClaw 未安装），回退到规则分析');
-  } else {
-    console.log('[callLLM] 所有 LLM 后端均失败，回退到规则分析');
-  }
-  return null;
+  const timeout = Math.min(Math.max(baseTimeout, Math.ceil(prompt.length / 1024) * 5000), 600000);
+  return callLLMApi(llmCfg.baseUrl, llmCfg.apiKey, llmCfg.model || 'default', prompt, timeout);
 }
 
 // ========== 综合报告 prompt ==========
@@ -3441,6 +3368,13 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('无明确时间节点但需持续跟进的重要事项，用•列表，格式：• 【团队名】事项描述；多source团队必须用格式：• 【团队名-label】事项描述。正文不输出来源尾注。');
   parts.push('');
   parts.push('# 四、各团队会议汇总');
+  parts.push('');
+  parts.push('⚠️ 铁律（违反即为严重错误）：');
+  parts.push('1. 上方数据中每个"# 团队名"标题对应的数据，都必须在第四章中拥有独立的"## 团队名"小节，绝不能合并、省略或归并到其他团队。');
+  parts.push('2. 行政管理部、业务发展部、质量中心、音频中心、美术中心、决策分析部、SEED、引擎平台、技术中心、解限机、星砂岛、星河、运营发行中心等，虽然都是职能部门或项目组，但它们是不同的独立团队，必须各自独立成"##"小节。');
+  parts.push('3. 禁止将多个团队写在同一个"##"小节下。每个"##"标题只能对应一个团队。');
+  parts.push('4. 多source团队（如经典剑侠系列、剑网3系列、剑侠世界系列）在其小节内按 label 分"###"子小节。');
+  parts.push('');
   parts.push('对每个团队写一个小节：');
   parts.push('## 团队名');
   parts.push('### 会议统计');

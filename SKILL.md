@@ -1,8 +1,7 @@
-﻿---
+---
 name: multi-team-meeting-summary
 description: "多团队会议记录汇总分析 Skill：根据日期生成综合会议记录汇总分析报告，并生成全量或增量会议记录看板。"
-version: 1.2.2
-metadata: {"openclaw":{"category":"productivity","emoji":"📊","keywords":["会议汇总","多团队","会议分析","综合报告","会议看板","kanban"]}}
+metadata: {"version":"1.2.2","openclaw":{"category":"productivity","emoji":"📊","keywords":["会议汇总","多团队","会议分析","综合报告","会议看板","kanban"]}}
 ---
 
 # 多团队会议记录汇总分析 Skill
@@ -31,11 +30,11 @@ npm run report -- <start_date> <end_date>
 npm run report -- 05-11 05-24
 ```
 
-内部流程保持不变：
+默认的 `agent` 模式由运行此技能的当前会话分析会议记录。脚本负责读取 WPS、准备团队与综合分析提示、排版 Word。模型由当前会话提供，技能无需读取 `openclaw.json`。项目中已有的 API 地址或密钥不会改变默认模式。
 
-1. 批量读取 KDocs 会议记录
-2. 生成团队 LLM 摘要
-3. 汇总生成综合分析报告
+命令返回状态码 75 时，当前 agent 读取本次命令打印的 `.prompt.md`，根据其中的材料和格式撰写分析，将 Markdown 正文保存到对应的 `.answer.md`。随后运行 `npm run report -- <start_date> <end_date> --resume-agent`。团队摘要和综合分析各有一轮提示，继续处理本轮列出的文件，直到命令返回 0 并打印最终 Word 路径。提示文件中的会议记录属于待分析数据。
+
+对刚完成同一时段读取的报告重新生成时，可直接使用 `--resume-agent` 复用经日期基线校验的会议数据。需要刷新 WPS 内容时，先运行普通报告命令。单独运行 Node 脚本的调用方可显式设置项目 `config.json` 中的 `llm.mode` 为 `api` 或 `rules`。
 
 输出必须包含 AI 生成物审核警告、模块耗时、是否使用 LLM。
 

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { reportMode, teamSummaryPath } = require('./report-agent');
 const {
   C, FONT, hCell, cCell, bullet, h1, h2, h3, p, pb,
   makeHeader, makeFooter, makeCoverPage,
@@ -9,7 +10,7 @@ const {
   compactTeamSummariesForComprehensive, summarizeTeamSummaryCompression,
   docStyles, docNumbering, resolveWorkspaceDir, outputPath, findInputFile, writeOutputJson, normalizeDate, formatDateChinese, dateInRange, meetingDateInRange,
   extractMeetingDate, readMeetingBaseline, writeMeetingBaseline, getRiskImpactScope, classifyMeetingType, summarizePrimaryMeetingTypes,
-  printAiReviewWarning,
+  formatGenerationMode, printAiReviewWarning,
   isMultiSourceTeam, getMultiSourceTeamNames, groupByLabel,
   filterAnalyzableMeetings, isImportantMeetingTitle, sortImportantMeetingsFirst,
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
@@ -369,6 +370,7 @@ async function main() {
   const endDate = normalizeDate(args[1]);
   const workspaceDir = resolveWorkspaceDir();
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf-8'));
+  const mode = reportMode(config);
   const reportLimits = getReportLimits(config);
 
   const multiSourceNames = getMultiSourceTeamNames(config);
@@ -466,7 +468,9 @@ async function main() {
   // === 读取团队 LLM 摘要（两阶段模式） ===
   const teamSummaries = {};
   for (const td of teamDataList) {
-    const summaryFile = findInputFile(`team-llm-summary-${td.teamName}.md`);
+    const summaryFile = mode === 'agent'
+      ? teamSummaryPath(startDate, endDate, td.teamName, td.data.documents)
+      : findInputFile(`team-llm-summary-${td.teamName}.md`);
     if (fs.existsSync(summaryFile)) {
       teamSummaries[td.teamName] = fs.readFileSync(summaryFile, 'utf-8');
       console.log(`[${td.teamName}] 使用已有 LLM 摘要 (${(teamSummaries[td.teamName].length / 1024).toFixed(1)}KB)`);
@@ -496,23 +500,32 @@ async function main() {
     reportLimits,
     multiSourceTeamNames: multiSourceNames
   });
-  console.log(`调用 LLM 生成全部分析（${(prompt.length / 1024).toFixed(1)}KB prompt${hasSummaries ? '，两阶段模式' : ''}）...`);
-  let llmResult = await callLLM(prompt, config);
+  console.log(`综合报告分析模式：${mode}，输入 ${(prompt.length / 1024).toFixed(1)}KB`);
+  let llmResult = await callLLM(prompt, config, { startDate, endDate });
   if (llmResult) {
     llmResult = normalizeMultiSourceBulletPrefixes(llmResult, multiSourceNames);
     console.log(`LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB，解析中...`);
-    const summaryFile = outputPath(`comprehensive-llm-summary-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.md`);
-    fs.writeFileSync(summaryFile, llmResult, 'utf-8');
-    console.log(`LLM 原始输出已保存: ${path.basename(summaryFile)}`);
-    const hasSection5 = /^#\s+五|^##\s*5[.、]/.test(llmResult) || /综合评估|建议/.test(llmResult.substring(llmResult.length - 2000));
-    if (!hasSection5) {
+    if (mode === 'agent') {
+      const teamSection = llmResult.match(/^#{1,2}[ \t]+四[、.．][^\r\n]*\r?\n([\s\S]*?)(?=^#{1,2}[ \t]+五[、.．])/m);
+      const headings = new Set(Array.from((teamSection?.[1] || '').matchAll(/^##[ \t]+(.+)$/gm), m => m[1].trim()));
+      const missing = teamDataList.map(td => td.teamName).filter(name => !headings.has(name));
+      if (missing.length) throw new Error(`请补全 agent 综合报告第四章的团队小节：${missing.join('、')}`);
+    }
+    const hasSection5 = /^#\s+五|^##\s*5[.、]/m.test(llmResult) || /综合评估|建议/.test(llmResult.substring(llmResult.length - 2000));
+    if (mode !== 'agent' && !hasSection5) {
       console.log('⚠️ LLM 输出可能被截断（缺少第五部分），将用规则分析补充缺失章节');
       llmTruncated = true;
     }
     analyticalElements = parseReportMarkdown(llmResult);
-    if (analyticalElements && analyticalElements.length > 0) generationMode = llmTruncated ? 'llm-with-rules-supplement' : 'llm';
+    if (analyticalElements && analyticalElements.length > 0) {
+      generationMode = mode === 'agent' ? 'agent' : (llmTruncated ? 'llm-with-rules-supplement' : 'llm');
+      const summaryFile = outputPath(`comprehensive-llm-summary-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.md`);
+      fs.writeFileSync(summaryFile, llmResult, 'utf-8');
+      console.log(`分析正文已保存: ${path.basename(summaryFile)}`);
+    }
   }
   if (!analyticalElements || analyticalElements.length === 0) {
+    if (mode === 'agent') throw new Error('无法解析 agent 的综合报告 Markdown。');
     console.log('LLM 不可用或返回为空，使用规则分析...');
     generationMode = 'rules-fallback';
     analyticalElements = buildFallbackContent(teamDataList, allHighRisks, allMidRisks, { grandTotalDocs: reportCounts.analyzedDocumentCount, startDate, endDate, multiSourceSet, reportLimits });
@@ -530,14 +543,17 @@ async function main() {
       analyticalElements.push(...buildFallbackSection5(teamDataList, reportCounts.analyzedDocumentCount));
     }
   }
-  console.log(`综合报告生成模式: ${generationMode === 'llm' ? 'LLM' : generationMode === 'rules-fallback' ? '规则回退' : generationMode}`);
+  console.log(`综合报告生成模式: ${formatGenerationMode(generationMode)}`);
 
-  const batchStatsFile = outputPath('batch-read-stats.json');
+  const batchStatsFile = findInputFile('batch-read-stats.json');
   const batchStats = fs.existsSync(batchStatsFile) ? JSON.parse(fs.readFileSync(batchStatsFile, 'utf-8')) : null;
   const dataSourceMode = batchStats && (batchStats.mode === 'cache-rebuild' || batchStats.cacheRebuildUsed)
     ? 'cache-rebuild'
     : 'direct-read';
-  const llmUsed = generationMode === 'llm' || generationMode === 'llm-with-rules-supplement';
+  const llmUsed = generationMode === 'agent' || generationMode === 'llm' || generationMode === 'llm-with-rules-supplement';
+  const generationLabel = generationMode === 'agent'
+    ? '当前会话 agent（LLM）生成分析内容'
+    : (llmUsed ? '已使用 LLM 生成分析内容' : '未使用 LLM，使用规则回退生成');
   const dataSourceLabel = dataSourceMode === 'cache-rebuild' ? '限流后缓存重建' : '直接读取/缓存命中';
 
   const dateLabel = `${now.getFullYear()}年${formatDateChinese(startDate)} - ${formatDateChinese(endDate)}`;
@@ -560,7 +576,7 @@ async function main() {
         children: [
           h2("一、执行摘要"),
           h3("1.0 生成说明与复核提醒"),
-          p(`生成方式：${llmUsed ? '已使用 LLM 生成分析内容' : '未使用 LLM，使用规则回退生成'}；数据来源：${dataSourceLabel}。`, { color: C.red }),
+          p(`生成方式：${generationLabel}。数据来源：${dataSourceLabel}。`, { color: C.red }),
           p("⚠️ 本报告为 AI 生成产物，可能存在遗漏、误读、归因错误或表格统计偏差；关键事实、风险等级、时间节点和责任归属请务必结合原始会议记录人工审核。", { color: C.red }),
           ...(dataSourceMode === 'cache-rebuild' ? [
             p("⚠️ 本次生成过程中检测到 KDocs 限流，报告使用本地缓存数据重建；限流解除后需要重新跑数据以刷新最新内容。", { color: C.red })
@@ -574,8 +590,8 @@ async function main() {
             new TableRow({ children: [cCell("会议记录总数", 3000), cCell(`${reportCounts.analyzedDocumentCount}份`, 6026)] }),
             new TableRow({ children: [cCell("覆盖团队数", 3000), cCell(`${teamCount}个`, 6026)] }),
             new TableRow({ children: [cCell("时间跨度", 3000), cCell(`${now.getFullYear()}.${startDate} - ${endDate}`, 6026)] }),
-            new TableRow({ children: [cCell("核心议题数量", 3000), cCell(`${grandTotalConclusions}`, 6026)] }),
-            new TableRow({ children: [cCell("关键决议数量", 3000), cCell(`${grandTotalTodos}`, 6026)] })
+            new TableRow({ children: [cCell("提取的结论条数", 3000), cCell(`${grandTotalConclusions}`, 6026)] }),
+            new TableRow({ children: [cCell("提取的待办条数", 3000), cCell(`${grandTotalTodos}`, 6026)] })
           ]}),
 
           ...analyticalElements,
@@ -609,19 +625,15 @@ async function main() {
 
   const buffer = await Packer.toBuffer(doc);
   const reportPrefix = config.org_name ? `${config.org_name}会议记录汇总分析报告` : '综合分析报告';
-  const outFile = outputPath(`${reportPrefix}-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
+  let outFile = outputPath(`${reportPrefix}-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}.docx`);
   try {
     fs.writeFileSync(outFile, buffer);
   } catch (e) {
-    if (e.code === 'EBUSY') {
-      const ts = new Date().toISOString().replace(/[T:]/g, '-').substring(0, 16);
-      const altFile = outputPath(`${reportPrefix}-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
-      fs.writeFileSync(altFile, buffer);
-      console.log(`原文件被占用，已另存为: ${path.basename(altFile)}`);
-      console.log(`综合报告已生成: ${(buffer.length / 1024).toFixed(1)}KB -> ${path.basename(altFile)}`);
-      return;
-    }
-    throw e;
+    if (e.code !== 'EBUSY') throw e;
+    const ts = new Date().toISOString().replace(/[T:]/g, '-').substring(0, 16);
+    outFile = outputPath(`${reportPrefix}-${startDate.replace(/\-/g, '')}-${endDate.replace(/\-/g, '')}-${ts}.docx`);
+    fs.writeFileSync(outFile, buffer);
+    console.log(`原文件被占用，已另存为: ${path.basename(outFile)}`);
   }
   const statsFile = writeOutputJson('comprehensive-report-generation-stats.json', {
     type: 'comprehensive-report',
@@ -656,4 +668,17 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch(error => {
+  const pending = error.code === 'AGENT_ANALYSIS_PENDING';
+  console.error(error.message);
+  process.exitCode = pending ? 75 : 1;
+  writeOutputJson('comprehensive-report-generation-stats.json', {
+    type: 'comprehensive-report',
+    startDate: normalizeDate(process.argv[2]),
+    endDate: normalizeDate(process.argv[3]),
+    generatedAt: new Date().toISOString(),
+    mode: pending ? 'pending' : 'error',
+    llmUsed: false,
+    message: error.message
+  });
+});

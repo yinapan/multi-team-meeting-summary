@@ -35,6 +35,7 @@
   },
   "important_people": [],
   "llm": {
+    "mode": "agent",
     "baseUrl": "",
     "apiKey": "",
     "model": "",
