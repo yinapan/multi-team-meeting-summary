@@ -457,7 +457,7 @@ function bullet(t, o = {}) {
 function h1(t) { return new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: t, bold: true })] }); }
 function h2(t) { return new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun({ text: t, bold: true })] }); }
 function h3(t) { return new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun({ text: t, bold: true, color: '2E74B5' })] }); }
-function p(t, o = {}) { return new Paragraph({ spacing: { before: o.before || 160, after: o.after || 120, line: 276 }, alignment: AlignmentType.JUSTIFIED, children: [new TextRun({ text: t, bold: o.bold || false, font: FONT, size: 20, color: o.color || C.text })] }); }
+function p(t, o = {}) { return new Paragraph({ keepNext: o.keepNext, spacing: { before: o.before || 160, after: o.after || 120, line: 276 }, alignment: AlignmentType.JUSTIFIED, children: [new TextRun({ text: t, bold: o.bold || false, font: FONT, size: 20, color: o.color || C.text })] }); }
 function pb() { return new Paragraph({ children: [new PageBreak()] }); }
 
 // ========== 文本清洗 ==========
@@ -3373,19 +3373,22 @@ function buildComprehensiveReportPrompt(teamDataList, options = {}) {
   parts.push('1. 上方数据中每个"# 团队名"标题对应的数据，都必须在第四章中拥有独立的"## 团队名"小节，绝不能合并、省略或归并到其他团队。');
   parts.push('2. 行政管理部、业务发展部、质量中心、音频中心、美术中心、决策分析部、SEED、引擎平台、技术中心、解限机、星砂岛、星河、运营发行中心等，虽然都是职能部门或项目组，但它们是不同的独立团队，必须各自独立成"##"小节。');
   parts.push('3. 禁止将多个团队写在同一个"##"小节下。每个"##"标题只能对应一个团队。');
-  parts.push('4. 多source团队（如经典剑侠系列、剑网3系列、剑侠世界系列）在其小节内按 label 分"###"子小节。');
+  parts.push('4. 各团队先写“### 会议统计”。多来源团队随后按本期有记录的每个来源写“### 来源标签”，每个来源下再写“#### 核心议题”“#### 关键决议”。即使本期只有一个来源有记录，也保留来源小节。');
+  for (const td of teamDataList.filter(td => msNames.includes(td.teamName))) {
+    parts.push(`   ${td.teamName} 本期来源：${[...groupByLabel(td.data.documents, td.teamName).keys()].join('、')}`);
+  }
   parts.push('');
   parts.push('对每个团队写一个小节：');
   parts.push('## 团队名');
   parts.push('### 会议统计');
-  parts.push('用一句话总结会议数量、核心议题数、关键决议数和重要会议数，语气保持外发报告风格。');
+  parts.push('用一段汇总本期会议数、重要会议数及下文实际列出的核心议题数、关键决议数。');
   parts.push('### 核心议题');
-  parts.push(`仅从该团队的"核心议题"数据中概括，3-8条（•列表），每条用一句话概括原文结论，不输出来源尾注。`);
+  parts.push('仅从该团队的会议数据中提炼具体议题，每项独占一行，以“• ”开头。没有可据实提炼的内容时写“本期纪要未记录明确的核心议题。”');
   if (msNames.length > 0) {
     parts.push(`多source团队（${msNames.join('、')}）的每条必须加【团队名-label】前缀，如：• 【剑网3系列-剑网3】xxx`);
   }
   parts.push('### 关键决议');
-  parts.push(`仅从该团队的结论数据中提取，3-8条（•列表），直接引用或简述原文决议内容，不输出来源尾注。`);
+  parts.push('仅从该团队的会议数据中提取明确的决议和已议定的行动，每项独占一行，以“• ”开头。没有明确决议时写“本期纪要未记录明确的关键决议。”');
   if (msNames.length > 0) {
     parts.push('多source团队的每条必须加【团队名-label】前缀');
   }
@@ -3618,8 +3621,8 @@ function parseReportMarkdown(markdown) {
       isFirstH1 = false;
       elements.push(h2(trimmed.replace(/^#\s+/, '')));
       lastType = 'h2';
-    } else if (/^###\s+/.test(trimmed)) {
-      elements.push(p(trimmed.replace(/^###\s+/, ''), { bold: true }));
+    } else if (/^#{3,4}\s+/.test(trimmed)) {
+      elements.push(p(trimmed.replace(/^#{3,4}\s+/, ''), { bold: true, keepNext: true }));
       lastType = 'bold-p';
     } else if (/^##\s+/.test(trimmed)) {
       elements.push(h3(trimmed.replace(/^##\s+/, '')));

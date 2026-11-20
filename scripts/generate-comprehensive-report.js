@@ -38,6 +38,71 @@ function teamDocCount(td) {
   return ((td && td.data && td.data.documents) || []).length;
 }
 
+// Preserve the agent's lists and compute the statistics from the same dated
+// records and list items that are actually rendered in chapter four.
+function formatAgentTeamSections(markdown, teamDataList, multiSourceSet, pending) {
+  const chapter = /^(#{1,2}[ \t]+四[、.．][^\n]*\n)([\s\S]*?)(?=^#{1,2}[ \t]+五[、.．])/m.exec(markdown);
+  if (!chapter) throw pending('请补全第四章“各团队会议汇总”。');
+
+  function sections(text, level) {
+    const heading = new RegExp(`^#{${level}}[ \\t]+([^\\n]+)$`, 'gm');
+    const matches = [...text.matchAll(heading)];
+    return matches.map((match, i) => ({
+      title: match[1].trim(),
+      body: text.slice(match.index + match[0].length, matches[i + 1]?.index).trim()
+    }));
+  }
+
+  function requireHeadings(blocks, names, scope) {
+    const found = new Set(blocks.map(block => block.title));
+    if (blocks.length !== names.length || names.some(name => !found.has(name))) {
+      throw pending(`${scope}应分别包含以下小节：${names.join('、')}。`);
+    }
+  }
+
+  function countDetails(blocks, scope, prefix = '') {
+    requireHeadings(blocks, ['核心议题', '关键决议'], scope);
+    if (blocks[0].title !== '核心议题') throw pending(`${scope}请先写核心议题，再写关键决议。`);
+    return blocks.map(({ title, body }) => {
+      const lines = body.split('\n').map(line => line.trim()).filter(Boolean);
+      if (lines.length === 1 && !/^[•*\-#]/.test(lines[0]) &&
+          /未记录|未形成|未明确|未发现|未列出|未提及|暂无|无明确|数据不足|^无[。.]?$/.test(lines[0])) return 0;
+      const listed = lines.length && lines.every(line => {
+        const item = line.match(/^(?:[•*\-]|\d+[.、])\s+(\S.*)$/);
+        return item && item[1].startsWith(prefix) && item[1].length > prefix.length;
+      });
+      if (!listed) throw pending(`${scope}的“${title}”须逐条使用项目符号${prefix ? '并带 ' + prefix + ' 前缀' : ''}；缺少依据时写明本期纪要未记录该项。`);
+      return lines.length;
+    });
+  }
+
+  const teams = sections(chapter[2], 2);
+  const entries = new Map(teamDataList.map(td => [td.teamName, td]));
+  requireHeadings(teams, [...entries.keys()], '第四章');
+  const formatted = teams.map(({ title: team, body }) => {
+    const { data, analysis } = entries.get(team);
+    const [stats, ...details] = sections(body, 3);
+    if (stats?.title !== '会议统计') throw pending(`${team}应以“### 会议统计”开始。`);
+    let counts;
+    if (multiSourceSet.has(team)) {
+      const labels = [...groupByLabel(data.documents, team).keys()];
+      requireHeadings(details, labels, team);
+      counts = [0, 0];
+      for (const source of details) {
+        const prefix = `【${team}-${source.title}】`;
+        const [topics, decisions] = countDetails(sections(source.body, 4), prefix, prefix);
+        counts[0] += topics;
+        counts[1] += decisions;
+      }
+    } else {
+      counts = countDetails(details, team);
+    }
+    const statsText = `本期共 ${data.documents.length} 场会议，其中 ${analysis.importantCount} 场为重要会议。下文汇总 ${counts[0]} 项核心议题、${counts[1]} 项关键决议。`;
+    return [`## ${team}`, '### 会议统计', statsText, ...details.map(block => `### ${block.title}\n\n${block.body}`)].join('\n\n');
+  });
+  return markdown.slice(0, chapter.index) + chapter[1] + '\n' + formatted.join('\n\n') + '\n\n' + markdown.slice(chapter.index + chapter[0].length);
+}
+
 function sortTeamsByDocumentCount(teamDataList) {
   return [...(teamDataList || [])].sort((a, b) =>
     teamDocCount(b) - teamDocCount(a) || String(a.teamName || '').localeCompare(String(b.teamName || ''), 'zh-Hans-CN')
@@ -501,16 +566,13 @@ async function main() {
     multiSourceTeamNames: multiSourceNames
   });
   console.log(`综合报告分析模式：${mode}，输入 ${(prompt.length / 1024).toFixed(1)}KB`);
-  let llmResult = await callLLM(prompt, config, { startDate, endDate });
+  let llmResult = await callLLM(prompt, config, {
+    startDate, endDate,
+    formatAnswer: (answer, pending) => formatAgentTeamSections(answer, teamDataList, multiSourceSet, pending)
+  });
   if (llmResult) {
     llmResult = normalizeMultiSourceBulletPrefixes(llmResult, multiSourceNames);
     console.log(`LLM 返回 ${(llmResult.length / 1024).toFixed(1)}KB，解析中...`);
-    if (mode === 'agent') {
-      const teamSection = llmResult.match(/^#{1,2}[ \t]+四[、.．][^\r\n]*\r?\n([\s\S]*?)(?=^#{1,2}[ \t]+五[、.．])/m);
-      const headings = new Set(Array.from((teamSection?.[1] || '').matchAll(/^##[ \t]+(.+)$/gm), m => m[1].trim()));
-      const missing = teamDataList.map(td => td.teamName).filter(name => !headings.has(name));
-      if (missing.length) throw new Error(`请补全 agent 综合报告第四章的团队小节：${missing.join('、')}`);
-    }
     const hasSection5 = /^#\s+五|^##\s*5[.、]/m.test(llmResult) || /综合评估|建议/.test(llmResult.substring(llmResult.length - 2000));
     if (mode !== 'agent' && !hasSection5) {
       console.log('⚠️ LLM 输出可能被截断（缺少第五部分），将用规则分析补充缺失章节');

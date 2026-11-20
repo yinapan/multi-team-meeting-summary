@@ -27,7 +27,7 @@ function installFixture(project) {
   const shared = require(path.join(project, 'scripts', 'shared'));
   shared.scanAllTeams = async () => {
     fs.appendFileSync(path.join(project, 'scans.txt'), 'scan\n');
-    const files = ['Red', 'Blue'].map(label => ({
+    const files = ['Red', 'Blue', 'Beta'].map(label => ({
       name: '0512-' + label + '周会.otl',
       sourceLabel: label,
       id: label,
@@ -35,7 +35,7 @@ function installFixture(project) {
       mtime: 1,
       link: 'https://fixture.invalid/' + label
     }));
-    return [{ team: 'Alpha', files }];
+    return [{ team: 'Alpha', files: files.slice(0, 2) }, { team: 'Beta', files: files.slice(2) }];
   };
   shared.readDocAsync = async (drive, id) => {
     const progress = process.env.FIXTURE_REVISION || '核验样本数据';
@@ -77,20 +77,21 @@ async function testAgentFlow() {
     });
     if (result.error) throw result.error;
     assert.equal(result.status, expectedStatus, result.stdout + result.stderr);
+    return result.stdout + result.stderr;
   }
 
   try {
     fs.cpSync(__dirname, path.join(project, 'scripts'), { recursive: true });
     fs.mkdirSync(outputs);
     fs.writeFileSync(path.join(project, 'config.json'), JSON.stringify({
-      teams: [{ name: 'Alpha', sources: [{ label: 'Red' }, { label: 'Blue' }] }],
+      teams: [{ name: 'Alpha', sources: [{ label: 'Red' }, { label: 'Blue' }] }, { name: 'Beta' }],
       llm: { baseUrl: 'https://fixture.invalid', apiKey: 'synthetic-test-key' }
     }));
     fs.writeFileSync(path.join(outputs, 'team-llm-summary-Alpha.md'), 'stale-summary-sentinel');
 
     runReport([], 75);
     const teams = promptFiles();
-    assert.equal(teams.length, 2, 'prepare all team sources in one pass');
+    assert.equal(teams.length, 3, 'prepare all team sources in one pass');
     assert.ok(!fs.readdirSync(outputs).some(name => name.endsWith('.docx')));
     // A dashboard may replace the global batch between analysis stages.
     fs.writeFileSync(path.join(outputs, 'all-team-summaries.json'), '[]');
@@ -101,6 +102,7 @@ async function testAgentFlow() {
     assert.deepEqual(promptFiles().sort(), teams.sort(), 'wait for every source before preparing the comprehensive report');
 
     fs.writeFileSync(answerPath(teams[1]), analysis('第二份摘要结论'));
+    fs.writeFileSync(answerPath(teams[2]), analysis('第三份摘要结论'));
     runReport(['--resume-agent'], 75);
     const comprehensive = promptFiles().filter(prompt => !teams.includes(prompt));
     assert.equal(comprehensive.length, 1);
@@ -108,24 +110,54 @@ async function testAgentFlow() {
     assert.ok(input.includes('第一份摘要结论') && input.includes('第二份摘要结论'));
     assert.ok(!input.includes('stale-summary-sentinel'));
 
-    fs.writeFileSync(answerPath(comprehensive[0]), analysis('本次综合分析结论'));
+    const flatAnswer = analysis('本次综合分析结论').replace('本期两个来源均完成样本数据核验。', '样本已核验。\n\n## Beta\n\n正在验收。');
+    const comprehensiveAnswer = answerPath(comprehensive[0]);
+    fs.writeFileSync(comprehensiveAnswer, flatAnswer);
+    const diagnostic = runReport(['--resume-agent'], 75);
+    assert.ok(diagnostic.includes('会议统计') && diagnostic.includes(comprehensiveAnswer));
+    const detailed = flatAnswer.replace('样本已核验。', [
+      '### 会议统计', '本期共 99 场会议。',
+      ...['Blue', 'Red'].flatMap(label => [
+        '### ' + label, '#### 核心议题', `• 【Alpha-${label}】样本数据核验。`,
+        '#### 关键决议', `• 【Alpha-${label}】进入下一轮验收。`
+      ])
+    ].join('\n')).replace('正在验收。', [
+      '### 会议统计', '本期共 99 场会议。',
+      '### 核心议题', '• 单来源会议讨论样本数据核验。',
+      '### 关键决议', '本期纪要未记录明确的关键决议。'
+    ].join('\n'));
+    fs.writeFileSync(comprehensiveAnswer, detailed.replace('• 单来源会议讨论', '单来源会议讨论'));
+    assert.match(runReport(['--resume-agent'], 75), /Beta的“核心议题”须逐条使用项目符号/);
+    fs.writeFileSync(comprehensiveAnswer, detailed);
     runReport(['--resume-agent'], 0);
     assert.equal(fs.readFileSync(path.join(project, 'scans.txt'), 'utf8'), 'scan\n', 'resume must reuse the original batch');
     const stats = readStats('comprehensive-report-generation-stats.json');
     assert.equal(stats.mode, 'agent');
     assert.equal(stats.llmUsed, true);
-    assert.equal(stats.documents, 2);
+    assert.equal(stats.documents, 3);
     assert.equal(readStats('main-report-generation-stats.json').llmUsed, true);
     const reportFile = path.join(outputs, stats.output);
     const completedReport = fs.readFileSync(reportFile);
     const document = await JSZip.loadAsync(completedReport);
     const xml = await document.file('word/document.xml').async('string');
     assert.ok(xml.includes('本次综合分析结论'), 'render the actual supplied agent analysis');
+    assert.ok(xml.includes('本期共 2 场会议，其中 0 场为重要会议。下文汇总 2 项核心议题、2 项关键决议。'));
+    assert.ok(xml.includes('本期共 1 场会议，其中 0 场为重要会议。下文汇总 1 项核心议题、0 项关键决议。'));
+    assert.ok(!xml.includes('99 场会议') && !xml.includes('####'));
+    const paragraphs = xml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g);
+    for (const heading of ['会议统计', '核心议题', '关键决议']) {
+      const matches = paragraphs.filter(p => p.includes('>' + heading + '</w:t>'));
+      assert.equal(matches.length, heading === '会议统计' ? 2 : 3);
+      assert.ok(matches.every(p => p.includes('<w:b/>') && p.includes('<w:keepNext/>')));
+    }
+    const realList = paragraphs.filter(p => /【Alpha-(Red|Blue)】|单来源会议讨论/.test(p));
+    assert.equal(realList.length, 5);
+    assert.ok(realList.every(p => p.includes('<w:numPr>')), 'render each item as a native Word list paragraph');
     assert.match(xml, /agent/i);
     assert.ok(!xml.includes('未使用 LLM，使用规则回退生成'));
 
     runReport([], 75, '修订后的样本核验');
-    assert.equal(promptFiles().filter(name => !teams.includes(name) && !comprehensive.includes(name)).length, 2,
+    assert.equal(promptFiles().filter(name => !teams.includes(name) && !comprehensive.includes(name)).length, 3,
       'changed evidence requires new answers even for the same date range');
     assert.deepEqual(fs.readFileSync(reportFile), completedReport, 'awaiting agent input must preserve completed reports');
   } finally {

@@ -39,6 +39,8 @@ Exit code 75 requests analysis from the current agent. Read each `.prompt.md` li
 
 To regenerate a report from a completed scan for the same period, start with `--resume-agent`; this reuses the validated dated inputs. Start with the normal report command when a fresh WPS scan is requested. Standalone script callers can select the project's `llm.mode` explicitly as `api` or `rules` in `config.json`.
 
+In chapter four of the comprehensive report, give each team with records its own section. Start with **会议统计**, giving the meeting count, important meeting count, and the numbers of topics and decisions listed below. Follow it with **核心议题** and **关键决议**, using one bullet per item. For a team with multiple sources, group both lists under each source represented that period, such as 理论研究院 under SEED. If the minutes contain no explicit decision, say so under 关键决议.
+
 For reports, titles marked `【保密】`, `[保密]`, or with equivalent full-width square brackets must be excluded before reading and from all counts, summaries, important-meeting lists, and generated reports. Confidential status always overrides an important marker or important attendee.
 
 ## Required Delivery

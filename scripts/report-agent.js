@@ -36,7 +36,7 @@ function teamSummaryPath(startDate, endDate, team, documents) {
   return path.join(agentRunDir(startDate, endDate), `team-${fileLabel(team)}-${key}.summary.md`);
 }
 
-function requestAgentAnalysis(prompt, { startDate, endDate, team, label } = {}) {
+function requestAgentAnalysis(prompt, { startDate, endDate, team, label, formatAnswer } = {}) {
   const directory = agentRunDir(startDate, endDate);
   const topic = team ? 'team-' + fileLabel([team, label].filter(Boolean).join('-')) : 'report';
   const stem = path.join(directory, `${topic}-${fingerprint([team, label, prompt])}`);
@@ -55,18 +55,19 @@ function requestAgentAnalysis(prompt, { startDate, endDate, team, label } = {}) 
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  if (!answer) {
-    const pending = new Error(`当前 agent 请读取 ${promptPath}，将分析正文保存为 ${answerPath}`);
-    Object.assign(pending, { code: 'AGENT_ANALYSIS_PENDING', promptPath, answerPath });
-    throw pending;
+  function pending(reason) {
+    const error = new Error(`${reason}\n当前 agent 请读取 ${promptPath}，将分析正文保存为 ${answerPath}`);
+    return Object.assign(error, { code: 'AGENT_ANALYSIS_PENDING', promptPath, answerPath });
   }
+  if (!answer) throw pending('等待当前会话分析。');
   const sections = [...answer.matchAll(/^#{1,2}[ \t]+(1\.2\b|[二三四五][、.．])/gm)];
   if (answer === prompt.trim() || !/^##?\s+1\.2\b/.test(answer) ||
       sections.map(match => match[1][0]).join('') !== '1二三四五' ||
       sections.some((match, i) => !answer.slice(match.index, sections[i + 1]?.index)
         .split('\n').some(line => line.trim() && !line.trimStart().startsWith('#')))) {
-    throw new Error(`请按 ${promptPath} 的章节要求补全当前 agent 的分析正文：${answerPath}`);
+    throw pending('请补全第一至第五章的标题及正文。');
   }
+  if (formatAnswer) return formatAnswer(answer, pending);
   return answer;
 }
 
